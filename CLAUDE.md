@@ -30,3 +30,7 @@ Loop: pull → topmost eligible unit in YOUR board → implement → run its
 - Never print/read `.env` into chat; hooks block it. Key-shaped strings
   never go in commands (pbpaste pattern instead).
 - Every payload leaving the machine passes `brain/post/filter` once built.
+
+## Shared plan
+- **SoT for tonight:** `docs/CODE-JAM.md` (phases, `/sidecar`, checkpoints).
+- `docs/george-plan.md` / `PRIMITIVES.md` still useful for brain ops and APIs.
