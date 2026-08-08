@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sidecar — live build feed</title>
+<style>
+  body{background:#0d1117;color:#e6edf3;font:15px/1.5 ui-monospace,monospace;max-width:680px;margin:0 auto;padding:24px}
+  h1{font-size:18px} .sub{color:#8b949e;font-size:13px;margin-bottom:20px}
+  .card{border:1px solid #30363d;border-radius:8px;padding:12px 14px;margin:10px 0;background:#161b22}
+  .kind{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#58a6ff}
+  .kind.digest{color:#d29922}.kind.render{color:#bc8cff}.kind.draft-post{color:#f778ba}
+  .ai{font-size:11px;color:#f0883e;border:1px solid #f0883e;border-radius:4px;padding:0 5px;margin-left:6px}
+  .title{font-weight:600;margin:4px 0} .body{color:#c9d1d9;white-space:pre-wrap}
+  .just{color:#8b949e;font-size:12px;font-style:italic;margin-top:6px}
+  img{max-width:100%;border-radius:6px;margin-top:8px}
+  #count{position:fixed;top:12px;right:16px;color:#3fb950;font-size:13px}
+  a{color:#58a6ff}
+</style>
+<h1>Sidecar — a feed about the work, generated while we work</h1>
+<div class="sub">Live from the grokathon: an agent is building Sidecar right now,
+and this is Sidecar watching it happen. Built on grok-build + Grok APIs.</div>
+<div id="count"></div>
+<div id="cards"></div>
+<script>
+let seq = 0, served = 0;
+async function tick(){
+  try{
+    const r = await fetch(`/cards?since=${seq}`);
+    const {cards} = await r.json();
+    for(const c of cards){
+      seq = Math.max(seq, c.seq); served++;
+      const el = document.createElement('div'); el.className='card';
+      el.innerHTML = `<span class="kind ${c.kind}">${c.kind}</span>` +
+        (c.generated ? `<span class="ai">AI-generated</span>` : '') +
+        `<div class="title"></div><div class="body"></div>` +
+        (c.media_url ? `<img loading="lazy" src="${encodeURI(c.media_url)}">` : '') +
+        (c.justification ? `<div class="just"></div>` : '') +
+        (c.source_url ? `<div class="just"><a href="${encodeURI(c.source_url)}" rel="noopener">source</a></div>` : '');
+      el.querySelector('.title').textContent = c.title;
+      el.querySelector('.body').textContent = c.body.slice(0, 400);
+      if(c.justification) el.querySelector('.just').textContent = `(${c.justification})`;
+      document.getElementById('cards').prepend(el);
+    }
+    document.getElementById('count').textContent = `${served} cards served live`;
+  }catch(e){ /* brain restarting; keep polling */ }
+  setTimeout(tick, 3000);
+}
+tick();
+</script>

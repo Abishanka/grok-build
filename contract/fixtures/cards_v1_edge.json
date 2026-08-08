@@ -1,0 +1,4 @@
+{"cards":[
+{"id":"e1","seq":100,"kind":"real","title":"unicode: 日本語テスト 🚀 émojis","body":"body with\nnewlines and a very long line that should wrap or truncate gracefully in any renderer without breaking layout at all costs","media_url":"","source_url":"https://x.com/u/status/3","generated":false,"justification":"","diff_context":""},
+{"id":"e2","seq":101,"kind":"digest","title":"empty-media edge","body":"","media_url":"","source_url":"","generated":true,"justification":"empty body allowed","diff_context":""}
+]}
