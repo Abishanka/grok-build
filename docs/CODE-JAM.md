@@ -1,3 +1,5 @@
+> **Superseded by [`docs/SIDECAR.md`](SIDECAR.md)** — single SoT for phases, `/sidecar`, checkpoints. Keep this file for history only.
+
 # CODE JAM / SIDECAR — shared plan (George + Abi)
 
 **Branch:** `sidecar-main` · **Repo:** https://github.com/Abishanka/grok-build  

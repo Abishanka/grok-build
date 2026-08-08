@@ -34,3 +34,9 @@ Loop: pull → topmost eligible unit in YOUR board → implement → run its
 ## Shared plan
 - **SoT for tonight:** `docs/CODE-JAM.md` (phases, `/sidecar`, checkpoints).
 - `docs/george-plan.md` / `PRIMITIVES.md` still useful for brain ops and APIs.
+
+## Shared plan (SoT)
+
+- **Single source of truth:** [`docs/SIDECAR.md`](docs/SIDECAR.md) — phases 1–4, `/sidecar` entry, checkpoints, contract, split.
+- API detail: `docs/PRIMITIVES.md` · wire: `contract/`
+- Historical: `docs/CODE-JAM.md`, `docs/george-plan.md` (superseded)

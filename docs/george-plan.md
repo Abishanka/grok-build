@@ -1,3 +1,5 @@
+> **Superseded by [`docs/SIDECAR.md`](SIDECAR.md)** for build priority and product scope. Brain/ops details may still be useful; resolve conflicts in favor of SIDECAR.md.
+
 # george-plan.md — Sidecar, George's side of the plan
 
 Abi is writing a user spec / feature model separately; this is my half.
