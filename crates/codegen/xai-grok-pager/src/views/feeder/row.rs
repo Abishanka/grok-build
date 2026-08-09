@@ -54,16 +54,34 @@ pub struct FeedMedia {
 }
 
 impl FeedMedia {
+    pub fn is_visual(&self) -> bool {
+        matches!(
+            self.kind.as_deref().unwrap_or(""),
+            "image" | "photo" | "video" | "animated_gif" | "gif"
+        ) && self
+            .image_url()
+            .map(|u| !u.is_empty() && !u.contains("example.com"))
+            .unwrap_or(false)
+    }
+
+    /// Best URL to show / open for this media object.
+    pub fn image_url(&self) -> Option<&str> {
+        self.poster_url
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .or_else(|| self.url.as_deref().filter(|u| !u.is_empty()))
+    }
+
     pub fn hint(&self) -> Option<String> {
         let kind = self.kind.as_deref().unwrap_or("none");
         if kind == "none" || kind.is_empty() {
             return None;
         }
         let glyph = match kind {
-            "video" => "▶",
-            "audio" => "♪",
-            "image" => "▣",
-            _ => "·",
+            "video" => "▶ video",
+            "audio" => "♪ audio",
+            "image" | "photo" | "animated_gif" | "gif" => "▣ image",
+            _ => "· media",
         };
         match self.duration_s {
             Some(s) if s > 0.0 => Some(format!("{glyph} {s:.0}s")),
@@ -272,26 +290,42 @@ impl FeedItem {
         }
     }
 
+    /// Prefer a real X status URL. Rejects truncated fixture-style IDs.
     pub fn open_url(&self) -> Option<String> {
-        self.x
-            .url
-            .clone()
-            .filter(|u| !u.is_empty())
-            .or_else(|| self.provenance.urls.first().cloned())
-            .or_else(|| {
-                self.x
-                    .post_id
-                    .as_ref()
-                    .or(self.provenance.x_post_id.as_ref())
-                    .map(|id| format!("https://x.com/i/status/{id}"))
-            })
-            .or_else(|| {
-                self.media
-                    .0
-                    .first()
-                    .and_then(|m| m.url.clone())
-                    .filter(|u| !u.is_empty())
-            })
+        let candidates = [
+            self.x.url.clone(),
+            self.provenance.urls.first().cloned(),
+            self.x
+                .post_id
+                .as_ref()
+                .or(self.provenance.x_post_id.as_ref())
+                .filter(|id| is_plausible_x_status_id(id))
+                .map(|id| {
+                    let h = self.handle();
+                    format!("https://x.com/{h}/status/{id}")
+                }),
+            self.media
+                .0
+                .iter()
+                .find_map(|m| m.image_url().map(|u| u.to_string())),
+        ];
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|u| is_plausible_open_url(u))
+    }
+
+    /// First image/video URL suitable for inline preview.
+    pub fn preview_image_url(&self) -> Option<String> {
+        self.media
+            .0
+            .iter()
+            .find(|m| m.is_visual())
+            .and_then(|m| m.image_url().map(|u| u.to_string()))
+    }
+
+    pub fn has_visual_media(&self) -> bool {
+        self.media.0.iter().any(|m| m.is_visual())
     }
 
     pub fn relative_time(&self) -> String {
@@ -306,21 +340,67 @@ impl FeedItem {
         raw.chars().take(10).collect()
     }
 
-    /// How many terminal rows this post needs at `width`.
+    /// How many terminal rows this post needs at `width` (includes trailing gap).
     pub fn height_rows(&self, width: u16, selected: bool) -> u16 {
-        let w = width.saturating_sub(2).max(8) as usize;
+        // content width: leave 1 col for left accent bar + 1 pad
+        let w = width.saturating_sub(3).max(8) as usize;
         let body_lines = wrap_text(self.post_text(), w);
-        // Keep cards shorter so "From X" + metrics stay on-screen.
-        let max_body = if selected { 5 } else { 3 };
+        let max_body = if selected { 8 } else { 5 };
         let body_h = body_lines.len().clamp(1, max_body) as u16;
-        let media_h = u16::from(self.media.0.iter().any(|m| m.hint().is_some()));
-        // author + source badge ("From X") + body + media? + metrics
-        1 + 1 + body_h + media_h + 1
+        let media_h = if self.has_visual_media() {
+            if selected {
+                MEDIA_PREVIEW_ROWS_SELECTED
+            } else {
+                MEDIA_PREVIEW_ROWS
+            }
+        } else {
+            0
+        };
+        // author + badge + body + media? + metrics + blank gap
+        1 + 1 + body_h + media_h + 1 + POST_GAP
     }
 }
 
-/// Word-wrap helper for dock width.
+/// Blank rows between cards.
+pub const POST_GAP: u16 = 1;
+/// Half-block image height (terminal rows) when not selected.
+pub const MEDIA_PREVIEW_ROWS: u16 = 5;
+/// Half-block image height when selected.
+pub const MEDIA_PREVIEW_ROWS_SELECTED: u16 = 8;
+
+fn is_plausible_x_status_id(id: &str) -> bool {
+    let id = id.trim();
+    // Real snowflake IDs are long numeric strings; reject "1", "2", "fixture_x_1".
+    id.len() >= 10 && id.chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_plausible_open_url(url: &str) -> bool {
+    let u = url.trim();
+    if u.is_empty() || u.contains("example.com") {
+        return false;
+    }
+    if let Some(rest) = u.strip_prefix("https://x.com/") {
+        if let Some(id) = rest.split("/status/").nth(1) {
+            let id = id.split(['?', '#']).next().unwrap_or(id);
+            return is_plausible_x_status_id(id);
+        }
+        // bare profile etc. ok
+        return !rest.is_empty();
+    }
+    if let Some(rest) = u.strip_prefix("https://twitter.com/") {
+        if let Some(id) = rest.split("/status/").nth(1) {
+            let id = id.split(['?', '#']).next().unwrap_or(id);
+            return is_plausible_x_status_id(id);
+        }
+        return !rest.is_empty();
+    }
+    u.starts_with("https://") || u.starts_with("http://")
+}
+
+/// Word-wrap by **display width** (not bytes) so CJK / bullets wrap correctly.
 pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
     if width == 0 {
         return vec![];
     }
@@ -332,9 +412,32 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
         }
         let mut cur = String::new();
         for word in para.split_whitespace() {
+            let word_w = UnicodeWidthStr::width(word);
+            // Hard-break overlong tokens
+            if word_w > width {
+                if !cur.is_empty() {
+                    lines.push(std::mem::take(&mut cur));
+                }
+                let mut chunk = String::new();
+                let mut cw = 0usize;
+                for ch in word.chars() {
+                    let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if cw + ch_w > width && !chunk.is_empty() {
+                        lines.push(std::mem::take(&mut chunk));
+                        cw = 0;
+                    }
+                    chunk.push(ch);
+                    cw += ch_w;
+                }
+                if !chunk.is_empty() {
+                    cur = chunk;
+                }
+                continue;
+            }
+            let cur_w = UnicodeWidthStr::width(cur.as_str());
             if cur.is_empty() {
                 cur = word.to_string();
-            } else if cur.len() + 1 + word.len() <= width {
+            } else if cur_w + 1 + word_w <= width {
                 cur.push(' ');
                 cur.push_str(word);
             } else {

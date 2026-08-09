@@ -134,6 +134,11 @@ impl FeederState {
         let mut changed = false;
         self.spinner_tick = self.spinner_tick.wrapping_add(1);
 
+        // Half-block image downloads
+        if let Ok(mut cache) = super::media_preview::global_cache().lock() {
+            changed |= cache.poll();
+        }
+
         if let Some(rx) = self.pending.take() {
             match rx.try_recv() {
                 Ok(Ok((items, label))) => {
@@ -196,7 +201,13 @@ impl FeederState {
 
     /// Whether the event loop should keep ticking for this dock.
     pub fn needs_tick(&self) -> bool {
-        self.loading || self.pending.is_some() || self.last_refresh_at.is_none()
+        if self.loading || self.pending.is_some() || self.last_refresh_at.is_none() {
+            return true;
+        }
+        super::media_preview::global_cache()
+            .lock()
+            .map(|c| c.needs_tick())
+            .unwrap_or(false)
     }
 
     /// Currently selected item, if any.

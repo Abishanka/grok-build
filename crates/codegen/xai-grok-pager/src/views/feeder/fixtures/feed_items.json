@@ -13,11 +13,18 @@
     "title": "OAuth refresh tokens expiring early on mobile",
     "body_md": "Seeing refresh tokens invalidated ~30m early when clock skew > 20s.\n\nFix that worked for us: leeway on exp check + force NTP on mobile. Thread ↓",
     "created_at": "2026-08-08T10:00:00Z",
-    "media": [],
+    "media": [
+      {
+        "kind": "image",
+        "url": "https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=640&h=360&fit=crop",
+        "poster_url": "https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=640&h=360&fit=crop",
+        "duration_s": null
+      }
+    ],
     "metrics": { "replies": 14, "reposts": 6, "likes": 89, "views": 4200 },
     "x": {
-      "post_id": "fixture_x_1",
-      "url": "https://x.com/authdev/status/1"
+      "post_id": "1829384756102938475",
+      "url": "https://x.com/authdev/status/1829384756102938475"
     },
     "ai": { "generated": false, "model": null },
     "ai_generated": false,
@@ -36,8 +43,8 @@
     "quality_score": 0.88,
     "provenance": {
       "ai_generated": false,
-      "urls": ["https://x.com/authdev/status/1"],
-      "x_post_id": "fixture_x_1",
+      "urls": ["https://x.com/authdev/status/1829384756102938475"],
+      "x_post_id": "1829384756102938475",
       "author_handle": "@authdev"
     }
   },
@@ -93,11 +100,18 @@
     "title": "pgvector HNSW filtered queries gotcha",
     "body_md": "pgvector HNSW gotcha: if you filter tenant_id *after* ANN you under-fetch.\n\nUse iterative scans (pgvector ≥0.8) or bake the filter into retrieval. Spent a day on “why only 3 rows”.",
     "created_at": "2026-08-08T08:00:00Z",
-    "media": [],
+    "media": [
+      {
+        "kind": "image",
+        "url": "https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=640&h=360&fit=crop",
+        "poster_url": "https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=640&h=360&fit=crop",
+        "duration_s": null
+      }
+    ],
     "metrics": { "replies": 22, "reposts": 31, "likes": 410, "views": 18000 },
     "x": {
-      "post_id": "fixture_x_2",
-      "url": "https://x.com/dbtips/status/2"
+      "post_id": "1829384756102938499",
+      "url": "https://x.com/dbtips/status/1829384756102938499"
     },
     "ai": { "generated": false, "model": null },
     "ai_generated": false,
@@ -116,8 +130,8 @@
     "quality_score": 0.9,
     "provenance": {
       "ai_generated": false,
-      "urls": ["https://x.com/dbtips/status/2"],
-      "x_post_id": "fixture_x_2",
+      "urls": ["https://x.com/dbtips/status/1829384756102938499"],
+      "x_post_id": "1829384756102938499",
       "author_handle": "@dbtips"
     }
   },
@@ -138,8 +152,8 @@
     "media": [
       {
         "kind": "image",
-        "url": "https://example.com/fixtures/feed-dock.png",
-        "poster_url": null,
+        "url": "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=640&h=360&fit=crop",
+        "poster_url": "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=640&h=360&fit=crop",
         "duration_s": null
       }
     ],

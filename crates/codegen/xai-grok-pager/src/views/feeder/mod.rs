@@ -17,6 +17,7 @@
 
 pub mod feed_client;
 pub mod layout;
+pub mod media_preview;
 pub mod peek;
 pub mod render;
 pub mod row;
@@ -42,17 +43,21 @@ pub fn feeder_enabled() -> bool {
 }
 
 /// Preferred dock width (phone column). Returns 0 if the terminal is too narrow.
+///
+/// Scales with terminal width (~32% of total, clamped). Target is ~10% wider
+/// than the previous fixed 44-col dock (→ ~48 base).
 pub fn dock_width(total_width: u16) -> u16 {
-    // Need room for a usable agent + dock + gap. Prefer a wider dock so
-    // "From X · Matched: …" is not clipped.
-    const MIN_TOTAL: u16 = 84;
-    const DOCK: u16 = 44;
-    const MIN_AGENT: u16 = 40;
+    const MIN_TOTAL: u16 = 80;
+    const MIN_AGENT: u16 = 42;
+    const MIN_DOCK: u16 = 40;
+    const MAX_DOCK: u16 = 64;
     if total_width < MIN_TOTAL {
         return 0;
     }
     let max_dock = total_width.saturating_sub(MIN_AGENT + 1);
-    DOCK.min(max_dock).max(36).min(max_dock)
+    // ~32% of terminal, floor 48 when space allows (10% over old 44).
+    let preferred = ((total_width as u32 * 32) / 100).clamp(48, MAX_DOCK as u32) as u16;
+    preferred.min(max_dock).max(MIN_DOCK).min(max_dock)
 }
 
 /// Split `area` into `(agent_area, feeder_dock)` when dock is open.

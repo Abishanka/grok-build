@@ -1,14 +1,17 @@
-//! Feeder dock paint — X-style multi-line posts.
+//! Feeder dock paint — X-style multi-line posts with color + image previews.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::theme::Theme;
 use crate::views::goal_detail::truncate_to_width;
 
 use super::layout::compute_layout;
-use super::row::{wrap_text, FeedItem};
+use super::media_preview::global_cache;
+use super::row::{
+    wrap_text, FeedItem, SourceType, MEDIA_PREVIEW_ROWS, MEDIA_PREVIEW_ROWS_SELECTED, POST_GAP,
+};
 use super::state::FeederState;
 
 /// Render the Feeder dock into `buf`.
@@ -32,7 +35,8 @@ pub fn render_feeder(buf: &mut Buffer, area: Rect, state: &mut FeederState) -> O
     render_header(buf, layout.header, state, &theme);
 
     let list = layout.list;
-    // Only nudge scroll if selection is off-screen — don't clobber every frame
+    // Kick image downloads for visible cards before paint.
+    prefetch_media(state, list.width);
     ensure_selection_visible(state, list.height, list.width);
     render_posts(buf, list, state, &theme);
     render_footer(buf, layout.footer, state, &theme);
@@ -83,6 +87,24 @@ fn render_header(buf: &mut Buffer, area: Rect, state: &FeederState, theme: &Them
     );
 }
 
+fn prefetch_media(state: &FeederState, width: u16) {
+    let cache_arc = global_cache();
+    let Ok(mut cache) = cache_arc.lock() else {
+        return;
+    };
+    let cols = width.saturating_sub(3).max(12);
+    for (i, item) in state.items.iter().enumerate() {
+        if let Some(url) = item.preview_image_url() {
+            let rows = if i == state.selected {
+                MEDIA_PREVIEW_ROWS_SELECTED
+            } else {
+                MEDIA_PREVIEW_ROWS
+            };
+            cache.ensure(&url, cols, rows);
+        }
+    }
+}
+
 fn ensure_selection_visible(state: &mut FeederState, list_h: u16, width: u16) {
     if state.items.is_empty() || list_h == 0 {
         return;
@@ -90,7 +112,6 @@ fn ensure_selection_visible(state: &mut FeederState, list_h: u16, width: u16) {
     let sel = state.selected.min(state.items.len() - 1);
     state.selected = sel;
 
-    // If current scroll window already contains selection, keep it.
     let mut y = 0u16;
     let mut end = state.scroll;
     while end < state.items.len() {
@@ -105,7 +126,6 @@ fn ensure_selection_visible(state: &mut FeederState, list_h: u16, width: u16) {
         return;
     }
 
-    // Rebuild window ending at selection (or starting at selection).
     let mut start = sel;
     let mut h = state.items[sel].height_rows(width, true);
     while start > 0 {
@@ -143,15 +163,57 @@ fn render_posts(buf: &mut Buffer, area: Rect, state: &FeederState, theme: &Theme
         if y + h > end_y && idx != state.scroll {
             break;
         }
+        let content_h = h.saturating_sub(POST_GAP).min(end_y.saturating_sub(y));
         let block = Rect {
             x: area.x,
             y,
             width: area.width,
-            height: h.min(end_y.saturating_sub(y)),
+            height: content_h,
         };
         paint_post(buf, block, item, selected, state.dock_focused, theme);
         y = y.saturating_add(h);
         idx += 1;
+    }
+}
+
+/// Source-specific palette.
+struct CardColors {
+    accent: Color,
+    badge: Color,
+    author: Color,
+    body: Color,
+    dim: Color,
+    bg: Color,
+}
+
+fn card_colors(item: &FeedItem, selected: bool, dock_focused: bool, theme: &Theme) -> CardColors {
+    let (accent, badge) = match item.kind() {
+        // X.com — sky / cyan
+        SourceType::XPost => (Color::Rgb(29, 155, 240), Color::Rgb(29, 155, 240)),
+        // AI — violet
+        SourceType::SyntheticPost => (Color::Rgb(168, 85, 247), Color::Rgb(192, 132, 252)),
+        // You — green
+        SourceType::UserPost => (theme.accent_success, theme.accent_success),
+        SourceType::Other => (theme.text_secondary, theme.text_secondary),
+    };
+    let bg = if selected && dock_focused {
+        theme.bg_highlight
+    } else if selected {
+        theme.bg_light
+    } else {
+        theme.bg_base
+    };
+    CardColors {
+        accent,
+        badge,
+        author: if selected {
+            theme.text_primary
+        } else {
+            theme.gray_bright
+        },
+        body: theme.text_primary,
+        dim: theme.text_secondary,
+        bg,
     }
 }
 
@@ -166,29 +228,35 @@ fn paint_post(
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let bg = if selected && dock_focused {
-        theme.bg_highlight
-    } else if selected {
-        theme.bg_base
-    } else {
-        theme.bg_base
-    };
-    let fg = theme.text_primary;
-    let dim = theme.text_secondary;
+    let c = card_colors(item, selected, dock_focused, theme);
     let blank = " ".repeat(area.width as usize);
-    let base = Style::default().bg(bg);
+    let base = Style::default().bg(c.bg);
     for row in 0..area.height {
         buf.set_string(area.x, area.y + row, &blank, base);
     }
 
-    let w = area.width as usize;
+    // Left accent bar (1 col) — color-codes X vs AI vs You
+    for row in 0..area.height {
+        buf.set_string(
+            area.x,
+            area.y + row,
+            "▌",
+            Style::default().fg(c.accent).bg(c.bg),
+        );
+    }
+
+    let text_x = area.x.saturating_add(2);
+    let w = area.width.saturating_sub(2) as usize;
+    if w == 0 {
+        return;
+    }
     let mut row = 0u16;
     let sel_mark = if selected { "›" } else { " " };
 
-    // Author line — keep short so source badge always fits
+    // Author
     let handle = item.handle();
     let time = item.relative_time();
-    let handle_budget = w.saturating_sub(14).max(4); // room for " · From X" / time
+    let handle_budget = w.saturating_sub(10).max(4);
     let handle_disp = truncate_to_width(&handle, handle_budget);
     let author = if time.is_empty() {
         format!("{sel_mark}@{handle_disp}")
@@ -196,12 +264,12 @@ fn paint_post(
         format!("{sel_mark}@{handle_disp} · {time}")
     };
     buf.set_string(
-        area.x,
+        text_x,
         area.y + row,
         truncate_to_width(&author, w),
         Style::default()
-            .fg(if selected { fg } else { dim })
-            .bg(bg)
+            .fg(c.author)
+            .bg(c.bg)
             .add_modifier(if selected {
                 Modifier::BOLD
             } else {
@@ -213,22 +281,22 @@ fn paint_post(
         return;
     }
 
-    // FROM X / AI badge — painted SECOND so it is never clipped by tall bodies
+    // Source badge — colored
     {
         let badge = source_badge(item);
         let matched = match_fragment(item);
         let why = if matched.is_empty() {
-            badge
+            badge.clone()
         } else {
             format!("{badge} · {matched}")
         };
         buf.set_string(
-            area.x,
+            text_x,
             area.y + row,
-            truncate_to_width(&format!(" {why}"), w),
+            truncate_to_width(&why, w),
             Style::default()
-                .fg(if selected { fg } else { dim })
-                .bg(bg)
+                .fg(c.badge)
+                .bg(c.bg)
                 .add_modifier(Modifier::BOLD),
         );
         row += 1;
@@ -237,63 +305,132 @@ fn paint_post(
         }
     }
 
-    // Body — leave room for metrics (1 row) at the bottom when possible
-    let reserve_metrics: u16 = 1;
-    let body_budget = area
-        .height
-        .saturating_sub(row)
-        .saturating_sub(reserve_metrics)
-        .max(1);
-    let body_w = w.saturating_sub(2).max(6);
+    // Body — display-width wrap; leave room for media + metrics
+    let media_rows = if item.has_visual_media() {
+        if selected {
+            MEDIA_PREVIEW_ROWS_SELECTED
+        } else {
+            MEDIA_PREVIEW_ROWS
+        }
+    } else {
+        0
+    };
+    let reserve = 1u16 + media_rows; // metrics + media
+    let body_budget = area.height.saturating_sub(row).saturating_sub(reserve).max(1);
+    let body_w = w.saturating_sub(1).max(6);
     let wrapped = wrap_text(item.post_text(), body_w);
-    let max_body = (if selected { 5 } else { 3 }).min(body_budget as usize);
+    let max_body = (if selected { 8 } else { 5 }).min(body_budget as usize);
     for line in wrapped.iter().take(max_body) {
         if row >= area.height {
             break;
         }
         buf.set_string(
-            area.x,
+            text_x,
             area.y + row,
-            truncate_to_width(&format!(" {line}"), w),
-            Style::default().fg(fg).bg(bg),
+            truncate_to_width(line, w),
+            Style::default().fg(c.body).bg(c.bg),
         );
         row += 1;
     }
 
-    // Media hint (optional, only if room before metrics)
-    if let Some(hint) = item.media.0.iter().find_map(|m| m.hint()) {
-        if row + 1 < area.height {
-            buf.set_string(
-                area.x,
-                area.y + row,
-                truncate_to_width(&format!(" {hint}"), w),
-                Style::default().fg(dim).bg(bg),
-            );
-            row += 1;
+    // Image preview (half-block) or placeholder
+    if media_rows > 0 && row < area.height {
+        let avail = area.height.saturating_sub(row).saturating_sub(1).min(media_rows);
+        if avail > 0 {
+            let media_area = Rect {
+                x: text_x,
+                y: area.y + row,
+                width: area.width.saturating_sub(2),
+                height: avail,
+            };
+            paint_media(buf, media_area, item, &c);
+            row = row.saturating_add(avail);
         }
     }
 
-    // Metrics — ASCII so width is predictable in narrow docks
+    // Metrics
     if row < area.height {
         let m = &item.metrics;
         let metrics = format!(
-            " r{}  rt{}  <3{}",
+            "r{}  rt{}  ♥{}",
             fmt_count(m.replies),
             fmt_count(m.reposts),
             fmt_count(m.likes)
         );
         buf.set_string(
-            area.x,
+            text_x,
             area.y + row,
             truncate_to_width(&metrics, w),
-            Style::default().fg(dim).bg(bg),
+            Style::default().fg(c.dim).bg(c.bg),
         );
     }
 }
 
-/// Always-visible source label ("From X" / "AI post" / "You").
+fn paint_media(buf: &mut Buffer, area: Rect, item: &FeedItem, c: &CardColors) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let Some(url) = item.preview_image_url() else {
+        return;
+    };
+
+    let cache_arc = global_cache();
+    if let Ok(cache) = cache_arc.lock() {
+        if let Some(preview) = cache.get(&url) {
+            let max_rows = area.height as usize;
+            let max_cols = area.width as usize;
+            for (ri, prow) in preview.rows.iter().take(max_rows).enumerate() {
+                for (ci, (fg, bg)) in prow.cells.iter().take(max_cols).enumerate() {
+                    if let Some(cell) = buf.cell_mut((area.x + ci as u16, area.y + ri as u16)) {
+                        cell.set_symbol("▀");
+                        cell.set_style(Style::default().fg(*fg).bg(*bg));
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    // Loading / no-preview fallback
+    let label = item
+        .media
+        .0
+        .iter()
+        .find_map(|m| m.hint())
+        .unwrap_or_else(|| "▣ image".into());
+    let host = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("media");
+    // Draw a framed placeholder so the card still "has" an image slot
+    for r in 0..area.height {
+        let line = if r == 0 {
+            format!("┌{}┐", "─".repeat(area.width.saturating_sub(2) as usize))
+        } else if r + 1 == area.height {
+            format!("└{}┘", "─".repeat(area.width.saturating_sub(2) as usize))
+        } else if r == area.height / 2 {
+            let mid = format!(" {label} · {host} ");
+            let inner_w = area.width.saturating_sub(2) as usize;
+            let mid_t = truncate_to_width(&mid, inner_w);
+            let pad = inner_w.saturating_sub(unicode_width::UnicodeWidthStr::width(mid_t.as_str()));
+            let left = pad / 2;
+            let right = pad - left;
+            format!("│{}{}{}│", " ".repeat(left), mid_t, " ".repeat(right))
+        } else {
+            format!("│{}│", " ".repeat(area.width.saturating_sub(2) as usize))
+        };
+        buf.set_string(
+            area.x,
+            area.y + r,
+            truncate_to_width(&line, area.width as usize),
+            Style::default().fg(c.dim).bg(c.bg),
+        );
+    }
+}
+
 fn source_badge(item: &FeedItem) -> String {
-    // Prefer explicit chips that start with From / AI / You
     for chip in item.all_reason_chips() {
         let c = chip.trim();
         if c.eq_ignore_ascii_case("From X")
@@ -312,10 +449,10 @@ fn source_badge(item: &FeedItem) -> String {
         }
     }
     match item.kind() {
-        super::row::SourceType::XPost => "From X".into(),
-        super::row::SourceType::SyntheticPost => "AI post".into(),
-        super::row::SourceType::UserPost => "You".into(),
-        super::row::SourceType::Other => "Feed".into(),
+        SourceType::XPost => "From X".into(),
+        SourceType::SyntheticPost => "AI post".into(),
+        SourceType::UserPost => "You".into(),
+        SourceType::Other => "Feed".into(),
     }
 }
 
@@ -325,16 +462,14 @@ fn match_fragment(item: &FeedItem) -> String {
         if let Some(rest) = c.strip_prefix("Matched:") {
             let t = rest.trim();
             if !t.is_empty() {
-                // Keep short so "From X · Matched: …" fits a ~40-col dock
-                return format!("Matched: {}", truncate_plain(t, 18));
+                return format!("Matched: {}", truncate_plain(t, 22));
             }
         }
     }
-    // Fall back to first search term
     if let Some(t) = item.feed.search_terms.first() {
         let t = t.trim();
         if !t.is_empty() {
-            return format!("Matched: {}", truncate_plain(t, 18));
+            return format!("Matched: {}", truncate_plain(t, 22));
         }
     }
     String::new()
