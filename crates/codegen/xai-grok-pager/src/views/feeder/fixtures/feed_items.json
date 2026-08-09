@@ -1,0 +1,202 @@
+[
+  {
+    "id": "11111111-1111-1111-1111-111111111111",
+    "kind": "x_post",
+    "source_type": "x_post",
+    "author": {
+      "handle": "authdev",
+      "display_name": "Auth Dev",
+      "avatar_url": null,
+      "verified": false
+    },
+    "text": "Seeing refresh tokens invalidated ~30m early when clock skew > 20s.\n\nFix that worked for us: leeway on exp check + force NTP on mobile. Thread ↓",
+    "title": "OAuth refresh tokens expiring early on mobile",
+    "body_md": "Seeing refresh tokens invalidated ~30m early when clock skew > 20s.\n\nFix that worked for us: leeway on exp check + force NTP on mobile. Thread ↓",
+    "created_at": "2026-08-08T10:00:00Z",
+    "media": [],
+    "metrics": { "replies": 14, "reposts": 6, "likes": 89, "views": 4200 },
+    "x": {
+      "post_id": "fixture_x_1",
+      "url": "https://x.com/authdev/status/1"
+    },
+    "ai": { "generated": false, "model": null },
+    "ai_generated": false,
+    "feed": {
+      "topic_key": "oauth-refresh",
+      "search_terms": ["oauth refresh token", "TokenExpired"],
+      "reason_chips": ["From X", "Matched: oauth refresh"],
+      "score": null,
+      "workspace_key": null
+    },
+    "reason_chips": ["From X", "Matched: oauth refresh"],
+    "topic_key": "oauth-refresh",
+    "workspace_key": null,
+    "user_id": null,
+    "author_id": "x:authdev",
+    "quality_score": 0.88,
+    "provenance": {
+      "ai_generated": false,
+      "urls": ["https://x.com/authdev/status/1"],
+      "x_post_id": "fixture_x_1",
+      "author_handle": "@authdev"
+    }
+  },
+  {
+    "id": "22222222-2222-2222-2222-222222222222",
+    "kind": "synthetic_post",
+    "source_type": "synthetic_post",
+    "author": {
+      "handle": "jwt_notes",
+      "display_name": "JWT Notes",
+      "avatar_url": null,
+      "verified": false
+    },
+    "text": "If your refresh rotation “randomly” fails in CI: check clock skew before you rewrite the whole auth stack.\n\n60–120s leeway on exp + rotate-on-use kills most flaky TokenExpired reports. Not glamorous. Works.",
+    "title": "Clock skew vs refresh rotation",
+    "body_md": "If your refresh rotation “randomly” fails in CI: check clock skew before you rewrite the whole auth stack.\n\n60–120s leeway on exp + rotate-on-use kills most flaky TokenExpired reports. Not glamorous. Works.",
+    "created_at": "2026-08-08T10:05:00Z",
+    "media": [],
+    "metrics": { "replies": 3, "reposts": 1, "likes": 42, "views": null },
+    "x": { "post_id": null, "url": null },
+    "ai": { "generated": true, "model": "grok-4.5" },
+    "ai_generated": true,
+    "feed": {
+      "topic_key": "oauth-refresh",
+      "search_terms": ["refresh token rotation", "TokenExpired"],
+      "reason_chips": ["AI", "Matched: oauth refresh"],
+      "score": null,
+      "workspace_key": "repo:demo"
+    },
+    "reason_chips": ["AI", "Matched: oauth refresh"],
+    "topic_key": "oauth-refresh",
+    "workspace_key": "repo:demo",
+    "user_id": null,
+    "author_id": "feeder-synth",
+    "quality_score": 0.8,
+    "provenance": {
+      "ai_generated": true,
+      "model": "grok-4.5",
+      "urls": []
+    }
+  },
+  {
+    "id": "33333333-3333-3333-3333-333333333333",
+    "kind": "x_post",
+    "source_type": "x_post",
+    "author": {
+      "handle": "dbtips",
+      "display_name": "DB Tips",
+      "avatar_url": null,
+      "verified": true
+    },
+    "text": "pgvector HNSW gotcha: if you filter tenant_id *after* ANN you under-fetch.\n\nUse iterative scans (pgvector ≥0.8) or bake the filter into retrieval. Spent a day on “why only 3 rows”.",
+    "title": "pgvector HNSW filtered queries gotcha",
+    "body_md": "pgvector HNSW gotcha: if you filter tenant_id *after* ANN you under-fetch.\n\nUse iterative scans (pgvector ≥0.8) or bake the filter into retrieval. Spent a day on “why only 3 rows”.",
+    "created_at": "2026-08-08T08:00:00Z",
+    "media": [],
+    "metrics": { "replies": 22, "reposts": 31, "likes": 410, "views": 18000 },
+    "x": {
+      "post_id": "fixture_x_2",
+      "url": "https://x.com/dbtips/status/2"
+    },
+    "ai": { "generated": false, "model": null },
+    "ai_generated": false,
+    "feed": {
+      "topic_key": "pgvector-hnsw",
+      "search_terms": ["pgvector HNSW"],
+      "reason_chips": ["From X"],
+      "score": null,
+      "workspace_key": null
+    },
+    "reason_chips": ["From X"],
+    "topic_key": "pgvector-hnsw",
+    "workspace_key": null,
+    "user_id": null,
+    "author_id": "x:dbtips",
+    "quality_score": 0.9,
+    "provenance": {
+      "ai_generated": false,
+      "urls": ["https://x.com/dbtips/status/2"],
+      "x_post_id": "fixture_x_2",
+      "author_handle": "@dbtips"
+    }
+  },
+  {
+    "id": "44444444-4444-4444-4444-444444444444",
+    "kind": "synthetic_post",
+    "source_type": "synthetic_post",
+    "author": {
+      "handle": "tui_craft",
+      "display_name": "TUI Craft",
+      "avatar_url": null,
+      "verified": false
+    },
+    "text": "Building a side feed in a coding agent? Steal X’s mobile density:\n\n• author row\n• multi-line body (the post IS the content)\n• metrics footer\n• AI pill if synthetic\n\nFull-screen “digest lists” kill flow. Dock stays open while agents run.",
+    "title": "Side feed density",
+    "body_md": "Building a side feed in a coding agent? Steal X’s mobile density:\n\n• author row\n• multi-line body (the post IS the content)\n• metrics footer\n• AI pill if synthetic\n\nFull-screen “digest lists” kill flow. Dock stays open while agents run.",
+    "created_at": "2026-08-08T07:30:00Z",
+    "media": [
+      {
+        "kind": "image",
+        "url": "https://example.com/fixtures/feed-dock.png",
+        "poster_url": null,
+        "duration_s": null
+      }
+    ],
+    "metrics": { "replies": 5, "reposts": 2, "likes": 67, "views": null },
+    "x": { "post_id": null, "url": null },
+    "ai": { "generated": true, "model": "grok-4.5" },
+    "ai_generated": true,
+    "feed": {
+      "topic_key": "tui-active-view",
+      "search_terms": ["TUI feed dock"],
+      "reason_chips": ["AI", "Matched: TUI"],
+      "score": null,
+      "workspace_key": "repo:grok-build"
+    },
+    "reason_chips": ["AI", "Matched: TUI"],
+    "topic_key": "tui-active-view",
+    "workspace_key": "repo:grok-build",
+    "user_id": null,
+    "author_id": "feeder-synth",
+    "quality_score": 0.82,
+    "provenance": {
+      "ai_generated": true,
+      "model": "grok-4.5"
+    }
+  },
+  {
+    "id": "55555555-5555-5555-5555-555555555555",
+    "kind": "user_post",
+    "source_type": "user_post",
+    "author": {
+      "handle": "alice",
+      "display_name": "Alice",
+      "avatar_url": null,
+      "verified": false
+    },
+    "text": "Shipped: +90s leeway on refresh exp validation. Tests green. Feeder post from the dock.",
+    "title": "Shipped: +90s leeway on refresh exp",
+    "body_md": "Shipped: +90s leeway on refresh exp validation. Tests green. Feeder post from the dock.",
+    "created_at": "2026-08-08T11:00:00Z",
+    "media": [],
+    "metrics": { "replies": 0, "reposts": 0, "likes": 2, "views": null },
+    "x": { "post_id": null, "url": null },
+    "ai": { "generated": false, "model": null },
+    "ai_generated": false,
+    "feed": {
+      "topic_key": "oauth-refresh",
+      "search_terms": [],
+      "reason_chips": ["Shared post"],
+      "score": null,
+      "workspace_key": "repo:demo"
+    },
+    "reason_chips": ["Shared post"],
+    "topic_key": "oauth-refresh",
+    "workspace_key": "repo:demo",
+    "user_id": null,
+    "author_id": "alice",
+    "quality_score": 0.85,
+    "provenance": { "ai_generated": false, "urls": [] }
+  }
+]

@@ -136,6 +136,9 @@ urlencoding = { workspace = true }
 # Parsing (web_search)
 url = { workspace = true }
 
+# Feeder HTTP client — pure sync (reqwest::blocking panics inside Tokio TUI runtime)
+ureq = { version = "2.12", default-features = true, features = ["json"] }
+
 # Crash diagnostics
 xai-crash-handler = { path = "../xai-crash-handler" }
 

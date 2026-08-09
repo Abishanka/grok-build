@@ -23,6 +23,7 @@ use super::dashboard::{
     dispatch_dashboard_toggle_pin, dispatch_dashboard_toggle_worktree, dispatch_exit_dashboard,
     dispatch_open_dashboard,
 };
+use super::feeder::{dispatch_close_feeder, dispatch_open_feeder};
 use super::import_claude::{
     dispatch_dismiss_claude_import, dispatch_import_claude, dispatch_import_claude_cancel,
     dispatch_import_claude_confirm,
@@ -1310,6 +1311,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::EditPromptExternal => super::external_editor::dispatch_edit_prompt_external(app),
         Action::OpenDashboard => dispatch_open_dashboard(app),
         Action::ExitDashboard => dispatch_exit_dashboard(app),
+        Action::OpenFeeder => dispatch_open_feeder(app),
+        Action::CloseFeeder => dispatch_close_feeder(app),
         Action::DashboardAttach(id) => dispatch_dashboard_attach(app, id),
         Action::DashboardDispatch { text, attach } => {
             dispatch_dashboard_dispatch(app, text, attach)

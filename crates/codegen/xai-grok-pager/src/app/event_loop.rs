@@ -3198,6 +3198,7 @@ async fn drain_and_process(
                     // (`list_focused`); refocusing the terminal must not
                     // override the user's choice (e.g. vim overview focus).
                     ActiveView::AgentDashboard => {}
+                    ActiveView::Feeder => {}
                 }
                 return false;
             }

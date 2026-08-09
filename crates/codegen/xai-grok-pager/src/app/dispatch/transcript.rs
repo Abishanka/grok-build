@@ -475,7 +475,7 @@ fn toast_session_only_slash(app: &mut AppView, name: &str) {
                 d.set_error_toast(&msg);
             }
         }
-        ActiveView::Welcome | ActiveView::Agent(_) => {
+        ActiveView::Welcome | ActiveView::Agent(_) | ActiveView::Feeder => {
             app.show_toast(&msg);
         }
     }
