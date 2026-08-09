@@ -15,6 +15,7 @@ pub mod context;
 pub mod copy;
 pub mod dashboard;
 pub mod debug;
+pub mod feeder;
 pub mod delete;
 pub mod docs;
 pub mod doctor;
@@ -112,6 +113,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(session_info::SessionInfoCommand),
         Arc::new(rename::RenameCommand),
         Arc::new(dashboard::DashboardCommand),
+        Arc::new(feeder::FeederCommand),
         Arc::new(cd::CdCommand),
         Arc::new(theme::ThemeCommand),
         Arc::new(feedback::FeedbackCommand),

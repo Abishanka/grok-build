@@ -869,6 +869,8 @@ pub(super) fn dispatch_send_prompt_inner(
             if queued_while_running && !parked_sendable_wait {
                 maybe_show_send_now_tip(app);
             }
+            // Drive Feeder work index + slate refresh from live user work.
+            super::feeder::feeder_on_user_prompt(app, &text);
             return vec![Effect::SendPrompt {
                 agent_id,
                 session_id,
@@ -928,6 +930,9 @@ pub(super) fn dispatch_send_prompt_inner(
     };
     effects.extend(drain.effects);
     note_peek_page_flip(app, id, drain.page_flip_entry);
+    if consume_input {
+        super::feeder::feeder_on_user_prompt(app, &text);
+    }
     effects
 }
 

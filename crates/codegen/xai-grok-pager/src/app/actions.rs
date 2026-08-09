@@ -793,6 +793,10 @@ pub enum Action {
     OpenDashboard,
     /// Close the dashboard, returning to the previous `ActiveView`.
     ExitDashboard,
+    /// Open the Feeder feed view (`/feeder`).
+    OpenFeeder,
+    /// Close the Feeder view, returning to the previous `ActiveView`.
+    CloseFeeder,
     /// Attach to a dashboard row — switches to the parent agent and
     /// (for subagent rows) sets the parent's `active_subagent`.
     DashboardAttach(crate::views::dashboard::DashboardRowId),

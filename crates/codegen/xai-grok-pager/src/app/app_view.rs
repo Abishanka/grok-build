@@ -220,12 +220,15 @@ use super::bundle::BundleState;
 /// Note: `AgentDashboard` does not carry state directly because
 /// `DashboardState` is not `Copy`. The dashboard view-state lives on
 /// `AppView::dashboard` and is only "active" when `active_view == AgentDashboard`.
+/// Same pattern for [`ActiveView::Feeder`] / `AppView::feeder`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveView {
     Welcome,
     Agent(AgentId),
     /// The top-level Agent Dashboard. State lives in `AppView::dashboard`.
     AgentDashboard,
+    /// Feeder feed surface. State lives in `AppView::feeder`.
+    Feeder,
 }
 /// Target restored when leaving the dashboard (Ctrl+\ / Esc).
 /// Consumed by `dispatch_exit_dashboard`; dead agents fall back to
@@ -1190,6 +1193,17 @@ pub struct AppView {
     /// `~/.grok/config.toml`. `None` when the file/section is absent
     /// or contained malformed data — falls back to in-memory defaults.
     pub dashboard_persisted: Option<crate::views::dashboard::PersistedDashboard>,
+    /// Feeder dock state. `Some(_)` when open or recently closed (survives
+    /// reopen within the process). Held outside `ActiveView` like dashboard.
+    pub feeder: Option<crate::views::feeder::FeederState>,
+    /// Right-side Feeder dock is visible beside the agent (not a full-screen mode).
+    pub feeder_dock_open: bool,
+    /// When true, keys go to the Feeder dock; when false, to the agent prompt.
+    pub feeder_focused: bool,
+    /// Last painted feeder dock rect (for mouse hit-testing).
+    pub feeder_dock_rect: Option<ratatui::layout::Rect>,
+    /// Legacy: previous full-screen feeder return target (unused by dock toggle).
+    pub feeder_return: Option<ActiveView>,
     /// Per-platform key event normalizer.
     ///
     /// NOTE: new event consumers that bypass `AppView::handle_input`
@@ -1613,6 +1627,11 @@ impl AppView {
             dashboard: None,
             dashboard_return: None,
             dashboard_persisted: None,
+            feeder: None,
+            feeder_dock_open: false,
+            feeder_focused: false,
+            feeder_dock_rect: None,
+            feeder_return: None,
             keyboard_normalizer: KeyboardNormalizer::from_terminal_context(),
             voice_mode_enabled: false,
             voice_ui_active: false,
@@ -2031,6 +2050,11 @@ impl AppView {
                     d.error_toast = Some(crate::glyphs::sanitize_toast_message(msg).into_owned());
                 }
             }
+            ActiveView::Feeder => {
+                if let Some(f) = self.feeder.as_mut() {
+                    f.toast = Some(crate::glyphs::sanitize_toast_message(msg).into_owned());
+                }
+            }
             ActiveView::Welcome => {
                 if reconnect_success_hides_mismatch(
                     self.welcome_toast.as_ref().map(|(m, _)| m.as_str()),
@@ -2313,6 +2337,15 @@ impl AppView {
                     crate::views::modal::apply_doc_scroll_delta(scroll, lines);
                 }
             }
+            ActiveView::Feeder => {
+                if let Some(f) = self.feeder.as_mut() {
+                    if lines < 0 {
+                        f.move_selection(-1, 12);
+                    } else if lines > 0 {
+                        f.move_selection(1, 12);
+                    }
+                }
+            }
             ActiveView::AgentDashboard => {
                 let popup_target = self.dashboard.as_ref().and_then(|d| {
                     d.attached_agent
@@ -2438,9 +2471,23 @@ impl AppView {
             self.pending_action = None;
         }
         let modal_open = self.is_scroll_blocking_modal_open();
+        // When the pointer is over the Feeder dock, don't steal wheel for agent scrollback.
+        let mouse_over_feeder = self.feeder_dock_open
+            && self.feeder_dock_rect.is_some_and(|r| {
+                if let Event::Mouse(m) = ev {
+                    m.column >= r.x
+                        && m.column < r.x.saturating_add(r.width)
+                        && m.row >= r.y
+                        && m.row < r.y.saturating_add(r.height)
+                } else {
+                    false
+                }
+            });
         if let Event::Mouse(mouse) = ev
             && let Some(direction) = ScrollDirection::from_mouse_event(mouse)
             && !modal_open
+            && !mouse_over_feeder
+            && !self.feeder_focused
         {
             let config = self
                 .scroll_config
@@ -2756,6 +2803,84 @@ impl AppView {
                 {
                     return outcome;
                 }
+                // Feeder dock input — must run before agent prompt steals keys.
+                if self.feeder_dock_open
+                    && self.feeder.is_some()
+                    && !self.screen_mode.is_minimal()
+                {
+                    // Mouse: click/scroll on dock focuses + routes to feeder.
+                    // When already focused, wheel anywhere drives the feed.
+                    if let Event::Mouse(mouse) = ev {
+                        use crossterm::event::{MouseButton, MouseEventKind};
+                        let hit = self.feeder_dock_rect.is_some_and(|rect| {
+                            mouse.column >= rect.x
+                                && mouse.column < rect.x.saturating_add(rect.width)
+                                && mouse.row >= rect.y
+                                && mouse.row < rect.y.saturating_add(rect.height)
+                        });
+                        let scroll = matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        );
+                        let click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+                        if (hit && (click || scroll)) || (self.feeder_focused && scroll) {
+                            self.feeder_focused = true;
+                            if let Some(f) = self.feeder.as_mut() {
+                                f.dock_focused = true;
+                                return f.handle_input(ev, &self.registry);
+                            }
+                        }
+                    }
+                    if let Event::Key(key) = ev
+                        && key.kind != KeyEventKind::Release
+                    {
+                        let mods = key.modifiers;
+                        let none = mods.is_empty()
+                            || mods == crossterm::event::KeyModifiers::NONE;
+                        // Tab / Ctrl+F / Ctrl+I toggle focus (Tab often arrives as Ctrl+I)
+                        let toggle_focus = matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+                            || (key.code == KeyCode::Char('f')
+                                && mods.contains(crossterm::event::KeyModifiers::CONTROL))
+                            || (key.code == KeyCode::Char('i')
+                                && mods.contains(crossterm::event::KeyModifiers::CONTROL)
+                                && !mods.contains(crossterm::event::KeyModifiers::SHIFT));
+                        if toggle_focus {
+                            self.feeder_focused = !self.feeder_focused;
+                            if let Some(f) = self.feeder.as_mut() {
+                                f.dock_focused = self.feeder_focused;
+                                f.toast = Some(if self.feeder_focused {
+                                    "Focus: Feeder  j/k move · u use · e explain · x dismiss".into()
+                                } else {
+                                    "Focus: Agent".into()
+                                });
+                            }
+                            return InputOutcome::Changed;
+                        }
+                        if self.feeder_focused {
+                            if key.code == KeyCode::Esc && none {
+                                self.feeder_focused = false;
+                                if let Some(f) = self.feeder.as_mut() {
+                                    f.dock_focused = false;
+                                    f.toast =
+                                        Some("Focus: Agent · q or /feeder closes dock".into());
+                                }
+                                return InputOutcome::Changed;
+                            }
+                            // Consume every key while focused so nothing leaks into the agent prompt.
+                            if let Some(feeder) = self.feeder.as_mut() {
+                                let outcome = feeder.handle_input(ev, &self.registry);
+                                if !feeder.dock_focused {
+                                    self.feeder_focused = false;
+                                }
+                                // Treat Unchanged as Changed so the event loop still redraws focus chrome.
+                                return match outcome {
+                                    InputOutcome::Unchanged => InputOutcome::Changed,
+                                    other => other,
+                                };
+                            }
+                        }
+                    }
+                }
                 let prompt_paging = !overlay_active && !self.screen_mode.is_minimal();
                 let outcome = match self.agents.get_mut(&id) {
                     Some(agent) => {
@@ -2923,6 +3048,13 @@ impl AppView {
                     );
                     self.pending_effects.append(&mut dashboard.pending_effects);
                     outcome
+                } else {
+                    InputOutcome::Unchanged
+                }
+            }
+            ActiveView::Feeder => {
+                if let Some(ref mut feeder) = self.feeder {
+                    feeder.handle_input(ev, &self.registry)
                 } else {
                     InputOutcome::Unchanged
                 }
@@ -4784,6 +4916,12 @@ impl AppView {
                         } else {
                             (view_area, None)
                         };
+                        // Right-side Feeder dock: shrink agent area when open.
+                        let (agent_area, feeder_area) = crate::views::feeder::split_agent_feeder(
+                            agent_area,
+                            self.feeder_dock_open && self.feeder.is_some(),
+                        );
+                        self.feeder_dock_rect = feeder_area;
                         if let Some(d) = self.dashboard.as_mut() {
                             d.overlay_close_hit.set(header.and_then(|c| c.close_rect));
                             d.overlay_prev_hit.set(header.and_then(|c| c.prev_rect));
@@ -4845,6 +4983,22 @@ impl AppView {
                                     esc_owned_before_agent,
                                 },
                             );
+                            // Paint Feeder dock after agent so it sits on the right.
+                            let mut feeder_escapes: Option<String> = None;
+                            if let Some(farea) = feeder_area {
+                                if let Some(feeder) = self.feeder.as_mut() {
+                                    feeder.dock_focused = self.feeder_focused;
+                                    let (_cursor, feeder_esc) =
+                                        crate::views::feeder::render_feeder(
+                                            f.buffer_mut(),
+                                            farea,
+                                            feeder,
+                                        );
+                                    feeder_escapes = feeder_esc;
+                                }
+                            } else if self.feeder_dock_open {
+                                // Terminal too narrow — keep rect None.
+                            }
                             if let Some(modal) = self.import_claude_modal.as_mut() {
                                 let theme = crate::theme::Theme::current();
                                 crate::views::import_claude_modal::render_import_claude_modal(
@@ -4870,6 +5024,16 @@ impl AppView {
                                 panel.render(full_area, f.buffer_mut());
                             }
                             let (cursor_pos, post_flush) = result;
+                            let post_flush = match (post_flush, feeder_escapes) {
+                                (Some(mut a), Some(b)) => {
+                                    a.append_plain(&b);
+                                    Some(a)
+                                }
+                                (None, Some(b)) => {
+                                    Some(crate::terminal::overlay::PostFlush::plain(b))
+                                }
+                                (a, None) => a,
+                            };
                             let has_cloud = false;
                             if has_cloud
                                 || self.import_claude_modal.is_some()
@@ -5002,6 +5166,24 @@ impl AppView {
                             return (cursor, Self::merge_escapes(notif_escapes, popup_post_flush));
                         }
                     }
+                    ActiveView::Feeder => {
+                        if let Some(feeder) = self.feeder.as_mut() {
+                            let (cursor, feeder_esc) = crate::views::feeder::render_feeder(
+                                f.buffer_mut(),
+                                view_area,
+                                feeder,
+                            );
+                            if let Some(fps) = &fps_overlay {
+                                fps.render(full_area, f.buffer_mut());
+                            }
+                            if let Some(panel) = &scroll_debug_panel {
+                                panel.render(full_area, f.buffer_mut());
+                            }
+                            let feeder_pf = feeder_esc
+                                .map(crate::terminal::overlay::PostFlush::plain);
+                            return (cursor, Self::merge_escapes(notif_escapes, feeder_pf));
+                        }
+                    }
                 }
             }
             if let Some(fps) = &fps_overlay {
@@ -5050,6 +5232,7 @@ impl AppView {
                     .as_ref()
                     .is_some_and(|d| d.upgrade_cta_hit.rect.is_some()),
             ),
+            ActiveView::Feeder => (false, false, false, false),
         };
         if !(banner || welcome || header || dashboard) {
             return;
@@ -5313,6 +5496,12 @@ impl AppView {
         let mut needs_redraw = false;
         needs_redraw |= self.minimal_state.transcript.is_some();
         needs_redraw |= self.poll_clipboard_focus_tip();
+        // Feeder dock: poll background live fetch + auto-refresh while open.
+        if self.feeder_dock_open
+            && let Some(f) = self.feeder.as_mut()
+        {
+            needs_redraw |= f.poll();
+        }
         if matches!(self.active_view, ActiveView::Welcome) {
             self.welcome_tick = self.welcome_tick.wrapping_add(1);
             if let Some(expires_at) = self.welcome_toast.as_ref().map(|(_, at)| *at) {
@@ -5648,6 +5837,19 @@ impl AppView {
         if self.pending_action.is_some() {
             return TickDemand::Fast;
         }
+        // Keep ticks alive while Feeder is fetching or due for auto-refresh.
+        if self.feeder_dock_open
+            && self
+                .feeder
+                .as_ref()
+                .is_some_and(|f| f.needs_tick() || f.loading)
+        {
+            return TickDemand::Fast;
+        }
+        if self.feeder_dock_open && self.feeder.is_some() {
+            // Slow tick so auto-refresh (25s) can fire without a 30fps spin.
+            // Fall through to other fast reasons below; if none, return Slow at end of Agent arm.
+        }
         if self.minimal_state.transcript.is_some() {
             return TickDemand::Fast;
         }
@@ -5769,6 +5971,10 @@ impl AppView {
                 {
                     return TickDemand::Slow;
                 }
+                // Feeder dock open: slow ticks drive 25s auto-refresh + loading pulse.
+                if self.feeder_dock_open && self.feeder.is_some() {
+                    return TickDemand::Slow;
+                }
                 TickDemand::None
             }
             ActiveView::AgentDashboard => {
@@ -5790,6 +5996,13 @@ impl AppView {
                     TickDemand::Fast
                 } else {
                     TickDemand::None
+                }
+            }
+            ActiveView::Feeder => {
+                if self.feeder.as_ref().is_some_and(|f| f.needs_tick() || f.loading) {
+                    TickDemand::Fast
+                } else {
+                    TickDemand::Slow
                 }
             }
             ActiveView::Welcome => TickDemand::Slow,
@@ -6152,6 +6365,11 @@ pub(crate) mod tests {
             dashboard: None,
             dashboard_return: None,
             dashboard_persisted: None,
+            feeder: None,
+            feeder_dock_open: false,
+            feeder_focused: false,
+            feeder_dock_rect: None,
+            feeder_return: None,
             keyboard_normalizer: KeyboardNormalizer::from_terminal_context(),
             voice_mode_enabled: false,
             voice_ui_active: false,
