@@ -149,20 +149,23 @@ impl FeedClient {
 
     /// Heartbeat a session (keeps it alive).
     pub fn heartbeat(&self, session_id: &str) -> Result<(), FeedClientError> {
-        let body = serde_json::json!({
-            "session_id": session_id,
-        });
-        let _ = self.post_json("/v1/sessions/heartbeat", body)?;
+        let path = format!("/v1/sessions/{session_id}/heartbeat");
+        let body = serde_json::json!({});
+        let _ = self.post_json(&path, body)?;
         Ok(())
     }
 
     /// Post recent prompts as a moment (for session personalization).
-    pub fn post_moment(&self, session_id: &str, recent_prompts: &[String]) -> Result<(), FeedClientError> {
+    pub fn post_moment(
+        &self,
+        session_id: &str,
+        recent_prompts: &[String],
+    ) -> Result<(), FeedClientError> {
+        let path = format!("/v1/sessions/{session_id}/moment");
         let body = serde_json::json!({
-            "session_id": session_id,
             "recent_prompts": recent_prompts,
         });
-        let _ = self.post_json("/v1/sessions/moment", body)?;
+        let _ = self.post_json(&path, body)?;
         Ok(())
     }
 
@@ -207,9 +210,13 @@ impl FeedClient {
 pub struct SessionInfo {
     pub session_id: String,
     #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
     pub workspace_key: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default)]
+    pub ok: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -379,8 +379,8 @@ pub const MEDIA_PREVIEW_ROWS_SELECTED: u16 = 6;
 pub const DOCK_CAP: usize = 20;
 /// How many new ranked posts each refresh pulls (then merge + evict tail).
 pub const FETCH_BATCH: usize = 5;
-/// First open / cold start may request a larger batch to fill the dock.
-pub const FETCH_INITIAL: usize = 15;
+/// First open / cold start batch (must stay ≤ API max limit, currently 25).
+pub const FETCH_INITIAL: usize = 10;
 
 /// Backward-compat alias — prefer [`DOCK_CAP`].
 pub const SLATE_LIMIT: usize = DOCK_CAP;
