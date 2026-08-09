@@ -4,3 +4,5 @@
 
 # Feeder local work index
 .grok/feeder-session.md
+
+.worktree/
