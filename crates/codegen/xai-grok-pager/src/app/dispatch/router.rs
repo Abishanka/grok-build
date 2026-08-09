@@ -1313,6 +1313,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ExitDashboard => dispatch_exit_dashboard(app),
         Action::OpenFeeder => dispatch_open_feeder(app),
         Action::CloseFeeder => dispatch_close_feeder(app),
+        Action::FeederJamCommand { args } => {
+            super::feeder::dispatch_feeder_jam(app, &args)
+        }
         Action::DashboardAttach(id) => dispatch_dashboard_attach(app, id),
         Action::DashboardDispatch { text, attach } => {
             dispatch_dashboard_dispatch(app, text, attach)

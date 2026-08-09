@@ -70,7 +70,12 @@ fn render_header(buf: &mut Buffer, area: Rect, state: &FeederState, theme: &Them
         "off"
     };
     let focus = if state.dock_focused { "●" } else { "○" };
-    let title = format!(" {focus} Feeder {sel}/{n} {src}");
+    let scope = if let Some(j) = &state.jam {
+        format!("JAM·{}", truncate_to_width(&j.title, 12))
+    } else {
+        "solo".into()
+    };
+    let title = format!(" {focus} Feeder {sel}/{n} {src} {scope}");
     let style = if state.dock_focused {
         Style::default()
             .fg(theme.text_primary)
@@ -87,6 +92,39 @@ fn render_header(buf: &mut Buffer, area: Rect, state: &FeederState, theme: &Them
         truncate_to_width(&title, area.width as usize),
         style,
     );
+
+    // Plane strip (second header row)
+    if area.height >= 2 {
+        let strip = if state.jam.is_some() {
+            if state.planes.is_empty() {
+                " planes · …".to_string()
+            } else {
+                let bits: Vec<String> = state
+                    .planes
+                    .iter()
+                    .take(6)
+                    .map(|p| {
+                        let det = p
+                            .status_detail
+                            .as_deref()
+                            .map(|d| format!(":{d}"))
+                            .unwrap_or_default();
+                        format!("{}[{}{}]", p.origin, p.status, det)
+                    })
+                    .collect();
+                format!(" {}", bits.join(" · "))
+            }
+        } else {
+            " /feeder jam start".to_string()
+        };
+        let strip_style = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
+        buf.set_string(
+            area.x,
+            area.y + 1,
+            truncate_to_width(&strip, area.width as usize),
+            strip_style,
+        );
+    }
 }
 
 fn prefetch_media(state: &FeederState) {
@@ -588,7 +626,13 @@ fn render_footer(buf: &mut Buffer, area: Rect, state: &FeederState, theme: &Them
     let msg = state
         .toast
         .as_deref()
-        .unwrap_or_else(|| FeederState::help_line());
+        .unwrap_or_else(|| {
+            if state.in_jam() {
+                FeederState::help_line_jam()
+            } else {
+                FeederState::help_line()
+            }
+        });
     buf.set_string(
         area.x,
         area.y,

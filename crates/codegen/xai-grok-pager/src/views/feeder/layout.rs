@@ -25,8 +25,9 @@ pub fn compute_layout(area: Rect) -> FeederLayout {
         };
     }
 
-    let header_h: u16 = 1.min(area.height);
-    let footer_h: u16 = if area.height > 2 { 1 } else { 0 };
+    // header + optional plane strip (2 rows when tall enough)
+    let header_h: u16 = if area.height >= 6 { 2 } else { 1.min(area.height) };
+    let footer_h: u16 = if area.height > header_h + 1 { 1 } else { 0 };
     let list_h = area.height.saturating_sub(header_h + footer_h);
 
     let header = Rect {

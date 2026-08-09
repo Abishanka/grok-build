@@ -797,6 +797,10 @@ pub enum Action {
     OpenFeeder,
     /// Close the Feeder view, returning to the previous `ActiveView`.
     CloseFeeder,
+    /// `/feeder jam …` multiplayer commands (start|join|leave|end|invite|status).
+    FeederJamCommand {
+        args: String,
+    },
     /// Attach to a dashboard row — switches to the parent agent and
     /// (for subagent rows) sets the parent's `active_subagent`.
     DashboardAttach(crate::views::dashboard::DashboardRowId),

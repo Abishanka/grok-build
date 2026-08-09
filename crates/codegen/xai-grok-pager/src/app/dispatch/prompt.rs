@@ -870,11 +870,15 @@ pub(super) fn dispatch_send_prompt_inner(
                 maybe_show_send_now_tip(app);
             }
             // Drive Feeder work index + slate refresh from live user work.
-            super::feeder::feeder_on_user_prompt(app, &text);
+            // When jammed, may return an untrusted jam-brief to prepend (autotx).
+            let mut send_text = text.clone();
+            if let Some(brief) = super::feeder::feeder_on_user_prompt(app, &text) {
+                send_text = format!("{brief}\n\n{text}");
+            }
             return vec![Effect::SendPrompt {
                 agent_id,
                 session_id,
-                text,
+                text: send_text,
                 prompt_id,
                 skill_token_ranges,
             }];
@@ -931,7 +935,9 @@ pub(super) fn dispatch_send_prompt_inner(
     effects.extend(drain.effects);
     note_peek_page_flip(app, id, drain.page_flip_entry);
     if consume_input {
-        super::feeder::feeder_on_user_prompt(app, &text);
+        // Autotx jam brief is applied on the server-authoritative path above;
+        // here we still refresh feeder index / uplink.
+        let _ = super::feeder::feeder_on_user_prompt(app, &text);
     }
     effects
 }

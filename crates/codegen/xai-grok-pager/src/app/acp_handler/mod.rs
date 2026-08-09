@@ -256,6 +256,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                     let mut plan_mode_modal_refresh_needed = false;
                     let mut workflows_modal_refresh = false;
+                    let mut jam_uplink = None;
 
                     // Extract Plan updates before passing to tracker (tracker skips them).
                     let mutated = if dedup_drop {
@@ -408,6 +409,11 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         let had_activity_before = agent.session.tracker.activity().is_some();
                         let update = notif.request.update;
                         let user_echo = matches!(update, acp::SessionUpdate::UserMessageChunk(_));
+                        // Capture jam uplink payload before update is moved (borrow-safe).
+                        if !meta.is_replay && !agent.session.loading_replay {
+                            jam_uplink =
+                                crate::app::dispatch::feeder::jam_uplink_from_update(&update);
+                        }
                         agent
                             .session
                             .handle_update(update, &meta, &mut agent.scrollback);
@@ -529,6 +535,11 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                         !meta.is_replay && !agent.session.loading_replay
                     };
+
+                    // TUI↔TUI: apply jam uplink after agent borrow ends.
+                    if let Some(ev) = jam_uplink {
+                        crate::app::dispatch::feeder::feeder_apply_jam_uplink(app, ev);
+                    }
 
                     if plan_mode_modal_refresh_needed {
                         crate::app::dispatch::refresh_open_settings_modals(app);

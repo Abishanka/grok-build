@@ -101,9 +101,32 @@ impl FeedClient {
         cwd: Option<&str>,
         limit: usize,
     ) -> Result<Vec<FeedItem>, FeedClientError> {
+        self.query_feed_ex(
+            recent_prompts,
+            workspace_key,
+            None,
+            error_snippet,
+            diff_summary,
+            cwd,
+            limit,
+        )
+    }
+
+    /// Feed query with optional `jam_id` (shared jam feed scope).
+    pub fn query_feed_ex(
+        &self,
+        recent_prompts: &[String],
+        workspace_key: Option<&str>,
+        jam_id: Option<&str>,
+        error_snippet: Option<&str>,
+        diff_summary: Option<&str>,
+        cwd: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FeedItem>, FeedClientError> {
         let body = serde_json::json!({
             "user_id": self.user_id,
             "workspace_key": workspace_key,
+            "jam_id": jam_id,
             "limit": limit,
             "context": {
                 "cwd": cwd,
@@ -119,6 +142,225 @@ impl FeedClient {
             .cloned()
             .unwrap_or(serde_json::Value::Array(vec![]));
         serde_json::from_value(items).map_err(|e| FeedClientError::Transport(e.to_string()))
+    }
+
+    fn get_json(&self, path: &str, jam_token: Option<&str>) -> Result<serde_json::Value, FeedClientError> {
+        let url = format!("{}{path}", self.base_url);
+        let agent = self.agent();
+        let user_id = self.user_id.clone();
+        let api_key = self.api_key.clone();
+        let jam_token = jam_token.map(|s| s.to_string());
+        let url_c = url.clone();
+        std::thread::spawn(move || {
+            let mut req = agent.get(&url_c).set("X-User-Id", &user_id);
+            if let Some(key) = &api_key {
+                req = req.set("Authorization", &format!("Bearer {key}"));
+            }
+            if let Some(t) = &jam_token {
+                req = req.set("X-Jam-Token", t);
+            }
+            let resp = req
+                .call()
+                .map_err(|e| FeedClientError::Transport(e.to_string()))?;
+            let status = resp.status();
+            let v: serde_json::Value = resp
+                .into_json()
+                .map_err(|e| FeedClientError::Transport(e.to_string()))?;
+            if !(200..300).contains(&status) {
+                return Err(FeedClientError::Transport(format!(
+                    "HTTP {status} from {url_c}: {v}"
+                )));
+            }
+            Ok(v)
+        })
+        .join()
+        .map_err(|_| FeedClientError::Transport("feeder HTTP thread panicked".into()))?
+    }
+
+    fn post_json_jam(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        jam_token: Option<&str>,
+    ) -> Result<serde_json::Value, FeedClientError> {
+        let url = format!("{}{path}", self.base_url);
+        let agent = self.agent();
+        let user_id = self.user_id.clone();
+        let api_key = self.api_key.clone();
+        let jam_token = jam_token.map(|s| s.to_string());
+        let url_c = url.clone();
+        std::thread::spawn(move || {
+            let mut req = agent
+                .post(&url_c)
+                .set("X-User-Id", &user_id)
+                .set("Content-Type", "application/json");
+            if let Some(key) = &api_key {
+                req = req.set("Authorization", &format!("Bearer {key}"));
+            }
+            if let Some(t) = &jam_token {
+                req = req.set("X-Jam-Token", t);
+            }
+            let resp = req
+                .send_json(body)
+                .map_err(|e| FeedClientError::Transport(e.to_string()))?;
+            let status = resp.status();
+            let v: serde_json::Value = resp
+                .into_json()
+                .map_err(|e| FeedClientError::Transport(e.to_string()))?;
+            if !(200..300).contains(&status) {
+                return Err(FeedClientError::Transport(format!(
+                    "HTTP {status} from {url_c}: {v}"
+                )));
+            }
+            Ok(v)
+        })
+        .join()
+        .map_err(|_| FeedClientError::Transport("feeder HTTP thread panicked".into()))?
+    }
+
+    /// Create a jam; promote `seed_items` into shared feed.
+    pub fn jam_create(
+        &self,
+        title: &str,
+        origin: &str,
+        seed_items: &[serde_json::Value],
+    ) -> Result<serde_json::Value, FeedClientError> {
+        let body = serde_json::json!({
+            "title": title,
+            "origin": origin,
+            "display_name": origin,
+            "user_id": self.user_id,
+            "seed": {
+                "work_context": {"recent_prompts": []},
+                "items": seed_items,
+            }
+        });
+        self.post_json_jam("/v1/jams", body, None)
+    }
+
+    pub fn jam_join(
+        &self,
+        jam_id: &str,
+        token: &str,
+        origin: &str,
+        seed_items: &[serde_json::Value],
+    ) -> Result<serde_json::Value, FeedClientError> {
+        let body = serde_json::json!({
+            "origin": origin,
+            "token": token,
+            "display_name": origin,
+            "user_id": self.user_id,
+            "seed": { "items": seed_items }
+        });
+        self.post_json_jam(&format!("/v1/jams/{jam_id}/join"), body, Some(token))
+    }
+
+    pub fn jam_stream_events(
+        &self,
+        jam_id: &str,
+        plane_id: &str,
+        token: &str,
+        events: &[serde_json::Value],
+    ) -> Result<serde_json::Value, FeedClientError> {
+        let body = serde_json::json!({ "token": token, "events": events });
+        self.post_json_jam(
+            &format!("/v1/jams/{jam_id}/planes/{plane_id}/stream"),
+            body,
+            Some(token),
+        )
+    }
+
+    pub fn jam_planes(
+        &self,
+        jam_id: &str,
+        token: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, FeedClientError> {
+        let v = self.get_json(&format!("/v1/jams/{jam_id}/planes"), token)?;
+        let planes = v
+            .get("planes")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![]));
+        Ok(planes.as_array().cloned().unwrap_or_default())
+    }
+
+    pub fn jam_leave(
+        &self,
+        jam_id: &str,
+        plane_id: &str,
+        token: &str,
+    ) -> Result<(), FeedClientError> {
+        let body = serde_json::json!({ "plane_id": plane_id, "token": token });
+        let _ = self.post_json_jam(&format!("/v1/jams/{jam_id}/leave"), body, Some(token))?;
+        Ok(())
+    }
+
+    pub fn jam_end(&self, jam_id: &str, token: &str) -> Result<(), FeedClientError> {
+        let body = serde_json::json!({});
+        let _ = self.post_json_jam(&format!("/v1/jams/{jam_id}/end"), body, Some(token))?;
+        Ok(())
+    }
+
+    pub fn jam_invite(&self, jam_id: &str, token: &str) -> Result<serde_json::Value, FeedClientError> {
+        self.post_json_jam(
+            &format!("/v1/jams/{jam_id}/invite/post"),
+            serde_json::json!({}),
+            Some(token),
+        )
+    }
+
+    pub fn jam_brief(&self, jam_id: &str, token: &str) -> Result<String, FeedClientError> {
+        let v = self.get_json(&format!("/v1/jams/{jam_id}/brief"), Some(token))?;
+        Ok(v
+            .get("brief")
+            .or_else(|| v.get("room_digest"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string())
+    }
+
+    pub fn jam_list(&self) -> Result<Vec<serde_json::Value>, FeedClientError> {
+        let v = self.get_json("/v1/jams", None)?;
+        Ok(v.get("jams")
+            .and_then(|j| j.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Catch-up peer stream events. Returns (max_event_id, short headlines).
+    pub fn jam_events_since(
+        &self,
+        jam_id: &str,
+        token: Option<&str>,
+        since_id: i64,
+        limit: usize,
+    ) -> Result<(i64, Vec<String>), FeedClientError> {
+        let path = format!("/v1/jams/{jam_id}/events?since_id={since_id}&limit={limit}");
+        let v = self.get_json(&path, token)?;
+        let events = v
+            .get("events")
+            .and_then(|e| e.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut last = since_id;
+        let mut headlines = Vec::new();
+        for ev in events {
+            if let Some(id) = ev.get("id").and_then(|x| x.as_i64()) {
+                last = last.max(id);
+            }
+            let origin = ev
+                .get("origin")
+                .and_then(|x| x.as_str())
+                .unwrap_or("peer");
+            let kind = ev.get("kind").and_then(|x| x.as_str()).unwrap_or("event");
+            let title = ev
+                .get("title")
+                .and_then(|x| x.as_str())
+                .or_else(|| ev.get("text").and_then(|x| x.as_str()))
+                .unwrap_or("");
+            let line = format!("{origin} · {kind} · {title}");
+            headlines.push(line.chars().take(100).collect());
+        }
+        Ok((last, headlines))
     }
 
     /// `POST /v1/feed/feedback`
