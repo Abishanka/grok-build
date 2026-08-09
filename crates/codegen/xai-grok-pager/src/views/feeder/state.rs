@@ -14,7 +14,7 @@ use super::feed_client::{
     discuss_prompt, explain_prompt, untrusted_context_block, FeedClient, SessionInfo,
 };
 use super::row::{
-    filter_timeline, load_mock_items, FeedItem, DOCK_CAP, FETCH_BATCH, FETCH_INITIAL,
+    filter_timeline, FeedItem, DOCK_CAP, FETCH_BATCH, FETCH_INITIAL,
 };
 use super::work_context::WorkContext;
 
@@ -220,27 +220,34 @@ impl FeederState {
         self.start_refresh(hint);
     }
 
-    /// Prepend `incoming`, keep existing (minus dismissed/dupes), cap at [`DOCK_CAP`].
+    /// Prepend `incoming`, keep existing live posts only (never fixtures), cap at [`DOCK_CAP`].
     fn merge_slate(&mut self, incoming: Vec<FeedItem>) {
         let mut seen = HashSet::new();
         let mut out = Vec::with_capacity(DOCK_CAP);
         for it in incoming {
-            if self.dismissed.contains(&it.id) {
+            if self.dismissed.contains(&it.id) || is_embedded_fixture(&it) {
                 continue;
             }
             if seen.insert(it.id.clone()) {
                 out.push(it);
             }
+        }
+        // First successful live load: do not keep placeholder/fixture rows.
+        if self.cold_start {
+            out.truncate(DOCK_CAP);
+            self.items = out;
+            self.selected = 0;
+            self.scroll = 0;
+            return;
         }
         for it in self.items.drain(..) {
-            if self.dismissed.contains(&it.id) {
+            if self.dismissed.contains(&it.id) || is_embedded_fixture(&it) {
                 continue;
             }
             if seen.insert(it.id.clone()) {
                 out.push(it);
             }
         }
-        // Evict from the tail when over cap (oldest / previously lower-ranked).
         out.truncate(DOCK_CAP);
         self.items = out;
         if self.selected >= self.items.len() {
@@ -300,9 +307,7 @@ impl FeederState {
                     }
                 }
                 Ok(Err(err)) => {
-                    if self.items.is_empty() {
-                        self.items = load_mock_items().into_iter().take(DOCK_CAP).collect();
-                    }
+                    // Stay empty when offline — do NOT inject oauth/pgvector fixtures.
                     self.live = false;
                     self.set_toast(format!("Feeder · offline ({err})"), TOAST_TTL_STATUS);
                     self.loading = false;
@@ -601,4 +606,18 @@ impl FeederState {
     pub fn help_line() -> &'static str {
         "j/k · u use · e explain · x dismiss · o open · r refresh · Esc agent · q close"
     }
+}
+
+/// Hardcoded demo cards shipped in the binary (authdev / jwt_notes / dbtips / alice).
+fn is_embedded_fixture(item: &FeedItem) -> bool {
+    let id = item.id.as_str();
+    id.starts_with("11111111-")
+        || id.starts_with("22222222-")
+        || id.starts_with("33333333-")
+        || id.starts_with("44444444-")
+        || id.starts_with("55555555-")
+        || matches!(
+            item.handle().as_str(),
+            "authdev" | "jwt_notes" | "dbtips" | "tui_craft" | "alice"
+        )
 }
