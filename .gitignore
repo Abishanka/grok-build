@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Feeder local work index
+.grok/feeder-session.md
