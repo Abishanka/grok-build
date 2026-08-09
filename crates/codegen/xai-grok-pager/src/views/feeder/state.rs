@@ -75,10 +75,10 @@ impl Default for FeederState {
 }
 
 impl FeederState {
-    /// Fresh state: show fixtures immediately, kick off live fetch in background.
+    /// Fresh state: empty dock — live API only (no embedded fixture spam).
     pub fn new() -> Self {
         let mut s = Self {
-            items: load_mock_items().into_iter().take(DOCK_CAP).collect(),
+            items: Vec::new(),
             selected: 0,
             scroll: 0,
             peek_scroll: 0,
