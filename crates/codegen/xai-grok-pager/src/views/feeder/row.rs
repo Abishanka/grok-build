@@ -375,8 +375,15 @@ pub const POST_GAP: u16 = 3;
 pub const MEDIA_PREVIEW_ROWS: u16 = 4;
 /// Media slot height when selected.
 pub const MEDIA_PREVIEW_ROWS_SELECTED: u16 = 6;
-/// Max posts shown in the dock slate.
-pub const SLATE_LIMIT: usize = 5;
+/// Max posts held in the dock (ring buffer).
+pub const DOCK_CAP: usize = 20;
+/// How many new ranked posts each refresh pulls (then merge + evict tail).
+pub const FETCH_BATCH: usize = 5;
+/// First open / cold start may request a larger batch to fill the dock.
+pub const FETCH_INITIAL: usize = 15;
+
+/// Backward-compat alias — prefer [`DOCK_CAP`].
+pub const SLATE_LIMIT: usize = DOCK_CAP;
 
 fn is_plausible_x_status_id(id: &str) -> bool {
     let id = id.trim();

@@ -1,5 +1,6 @@
-//! Feeder view state — selection, scroll, toast, live or mock items.
+//! Feeder view state — selection, scroll, toast TTL, ~20-post ring.
 
+use std::collections::HashSet;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -12,18 +13,24 @@ use crate::app::app_view::InputOutcome;
 use super::feed_client::{
     discuss_prompt, explain_prompt, untrusted_context_block, FeedClient,
 };
-use super::row::{filter_timeline, load_mock_items, FeedItem, SLATE_LIMIT};
+use super::row::{
+    filter_timeline, load_mock_items, FeedItem, DOCK_CAP, FETCH_BATCH, FETCH_INITIAL,
+};
 use super::work_context::WorkContext;
 
 /// How often the dock re-queries the live API while open.
 const AUTO_REFRESH: Duration = Duration::from_secs(25);
+/// Footer toast auto-clear (Dismissed, Stored, etc.).
+const TOAST_TTL: Duration = Duration::from_millis(2500);
+/// Live status line lasts a bit longer.
+const TOAST_TTL_STATUS: Duration = Duration::from_secs(6);
 
 type RefreshMsg = Result<(Vec<FeedItem>, String), String>;
 
 /// In-memory state for the Feeder dock.
 #[derive(Debug)]
 pub struct FeederState {
-    /// Ranked feed cards (at most [`SLATE_LIMIT`]).
+    /// Ranked feed cards (at most [`DOCK_CAP`]).
     pub items: Vec<FeedItem>,
     /// Selected row index into `items` (0 when empty).
     pub selected: usize,
@@ -33,6 +40,8 @@ pub struct FeederState {
     pub peek_scroll: usize,
     /// Transient status / toast (footer).
     pub toast: Option<String>,
+    /// When `toast` should clear (None = sticky until replaced).
+    toast_until: Option<Instant>,
     /// Tick counter for spinner/blink if needed later.
     pub spinner_tick: u64,
     /// Whether the last load came from the live API.
@@ -43,6 +52,8 @@ pub struct FeederState {
     pub dock_focused: bool,
     /// Rolling user-work index (prompts) for personalized search.
     pub work: WorkContext,
+    /// Ids dismissed this session — skipped on merge so they don't bounce back.
+    dismissed: HashSet<String>,
     /// In-flight background feed fetch (never blocks the TUI thread).
     pending: Option<Receiver<RefreshMsg>>,
     /// Last successful (or failed) refresh attempt — drives auto-refresh.
@@ -51,6 +62,8 @@ pub struct FeederState {
     pub loading: bool,
     /// Force next refresh even if one just finished (after new user prompt).
     force_refresh: bool,
+    /// True until the first successful live merge (use larger fetch).
+    cold_start: bool,
 }
 
 impl Default for FeederState {
@@ -63,33 +76,37 @@ impl FeederState {
     /// Fresh state: show fixtures immediately, kick off live fetch in background.
     pub fn new() -> Self {
         let mut s = Self {
-            items: load_mock_items()
-                .into_iter()
-                .take(SLATE_LIMIT)
-                .collect(),
+            items: load_mock_items().into_iter().take(DOCK_CAP).collect(),
             selected: 0,
             scroll: 0,
             peek_scroll: 0,
             toast: Some("Feeder · connecting…".into()),
+            toast_until: Some(Instant::now() + TOAST_TTL_STATUS),
             spinner_tick: 0,
             live: false,
             compose_title: None,
             dock_focused: true,
             work: WorkContext::new(),
+            dismissed: HashSet::new(),
             pending: None,
             last_refresh_at: None,
             loading: false,
             force_refresh: false,
+            cold_start: true,
         };
         s.start_refresh(None);
         s
+    }
+
+    fn set_toast(&mut self, msg: impl Into<String>, ttl: Duration) {
+        self.toast = Some(msg.into());
+        self.toast_until = Some(Instant::now() + ttl);
     }
 
     /// Record a user prompt into the work index and schedule a refresh.
     pub fn note_user_prompt(&mut self, text: &str) {
         self.work.push(text);
         self.force_refresh = true;
-        // Allow overlapping: drop stale pending so new context wins soon
         if self.pending.is_none() {
             self.start_refresh(None);
         }
@@ -105,8 +122,6 @@ impl FeederState {
         if self.pending.is_some() && !self.force_refresh {
             return;
         }
-        // If forcing while in-flight, still skip starting a second thread —
-        // poll will start one when the current finishes if force_refresh set.
         if self.pending.is_some() {
             return;
         }
@@ -120,11 +135,22 @@ impl FeederState {
         let cwd = std::env::current_dir()
             .ok()
             .map(|p| p.display().to_string());
+        // Cold start: fill dock; later refreshes pull a small batch to merge.
+        let fetch_n = if self.cold_start || self.items.is_empty() {
+            FETCH_INITIAL
+        } else {
+            FETCH_BATCH
+        };
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
         self.loading = true;
-        if self.toast.is_none() || self.toast.as_deref().is_some_and(|t| t.contains("offline")) {
-            self.toast = Some(format!("Refreshing · {base}"));
+        if self.toast.is_none()
+            || self
+                .toast
+                .as_deref()
+                .is_some_and(|t| t.contains("offline") || t.contains("Dismissed"))
+        {
+            self.set_toast(format!("Refreshing · {base}"), TOAST_TTL_STATUS);
         }
         std::thread::Builder::new()
             .name("feeder-refresh".into())
@@ -135,11 +161,12 @@ impl FeederState {
                     None,
                     None,
                     cwd.as_deref(),
-                    SLATE_LIMIT,
+                    fetch_n,
                 ) {
                     Ok(items) if !items.is_empty() => {
                         let mut items = filter_timeline(items);
-                        items.truncate(SLATE_LIMIT);
+                        // Don't pre-truncate to DOCK_CAP here — merge handles cap.
+                        items.truncate(fetch_n.max(FETCH_BATCH));
                         let n = items.len();
                         let qhint = prompts
                             .first()
@@ -148,7 +175,7 @@ impl FeederState {
                                 format!(" · q:{t}")
                             })
                             .unwrap_or_default();
-                        Ok((items, format!("live · {n}{qhint}")))
+                        Ok((items, format!("+{n}{qhint}")))
                     }
                     Ok(_) => Err(format!("empty response from {base}")),
                     Err(err) => Err(format!("{err}")),
@@ -163,12 +190,48 @@ impl FeederState {
         self.start_refresh(hint);
     }
 
+    /// Prepend `incoming`, keep existing (minus dismissed/dupes), cap at [`DOCK_CAP`].
+    fn merge_slate(&mut self, incoming: Vec<FeedItem>) {
+        let mut seen = HashSet::new();
+        let mut out = Vec::with_capacity(DOCK_CAP);
+        for it in incoming {
+            if self.dismissed.contains(&it.id) {
+                continue;
+            }
+            if seen.insert(it.id.clone()) {
+                out.push(it);
+            }
+        }
+        for it in self.items.drain(..) {
+            if self.dismissed.contains(&it.id) {
+                continue;
+            }
+            if seen.insert(it.id.clone()) {
+                out.push(it);
+            }
+        }
+        // Evict from the tail when over cap (oldest / previously lower-ranked).
+        out.truncate(DOCK_CAP);
+        self.items = out;
+        if self.selected >= self.items.len() {
+            self.selected = self.items.len().saturating_sub(1);
+        }
+    }
+
     /// Poll background fetch + schedule auto-refresh. Returns true if UI should redraw.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         self.spinner_tick = self.spinner_tick.wrapping_add(1);
 
-        // Half-block image downloads
+        // Toast TTL
+        if let Some(until) = self.toast_until {
+            if Instant::now() >= until {
+                self.toast = None;
+                self.toast_until = None;
+                changed = true;
+            }
+        }
+
         if let Ok(mut cache) = super::media_preview::global_cache().lock() {
             changed |= cache.poll();
         }
@@ -176,14 +239,23 @@ impl FeederState {
         if let Some(rx) = self.pending.take() {
             match rx.try_recv() {
                 Ok(Ok((items, label))) => {
-                    self.items = items;
+                    let added = items.len();
+                    self.merge_slate(items);
                     self.live = true;
-                    self.selected = self.selected.min(self.items.len().saturating_sub(1));
-                    self.scroll = 0;
+                    self.cold_start = false;
                     self.peek_scroll = 0;
-                    self.toast = Some(format!("Feeder · {label}"));
+                    // Don't jump scroll to 0 on every merge — keep place unless empty before
+                    if self.scroll >= self.items.len() {
+                        self.scroll = 0;
+                    }
+                    let total = self.items.len();
+                    self.set_toast(
+                        format!("Feeder · live · {total} · {label}"),
+                        TOAST_TTL_STATUS,
+                    );
                     self.loading = false;
                     self.last_refresh_at = Some(Instant::now());
+                    let _ = added;
                     changed = true;
                     if self.force_refresh {
                         self.start_refresh(None);
@@ -191,13 +263,10 @@ impl FeederState {
                 }
                 Ok(Err(err)) => {
                     if self.items.is_empty() {
-                        self.items = load_mock_items()
-                            .into_iter()
-                            .take(SLATE_LIMIT)
-                            .collect();
+                        self.items = load_mock_items().into_iter().take(DOCK_CAP).collect();
                     }
                     self.live = false;
-                    self.toast = Some(format!("Feeder · offline ({err})"));
+                    self.set_toast(format!("Feeder · offline ({err})"), TOAST_TTL_STATUS);
                     self.loading = false;
                     self.last_refresh_at = Some(Instant::now());
                     changed = true;
@@ -206,23 +275,23 @@ impl FeederState {
                     }
                 }
                 Err(TryRecvError::Empty) => {
-                    // Still in flight — put receiver back.
                     self.pending = Some(rx);
-                    // Pulse toast so the dock feels alive while loading.
                     if self.spinner_tick % 8 == 0 {
                         let dots = match (self.spinner_tick / 8) % 3 {
                             0 => ".",
                             1 => "..",
                             _ => "...",
                         };
+                        // Loading pulse — short sticky while in flight
                         self.toast = Some(format!("Feeder · loading{dots}"));
+                        self.toast_until = Some(Instant::now() + Duration::from_secs(2));
                         changed = true;
                     }
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.loading = false;
                     self.last_refresh_at = Some(Instant::now());
-                    self.toast = Some("Feeder · refresh failed".into());
+                    self.set_toast("Feeder · refresh failed", TOAST_TTL);
                     changed = true;
                 }
             }
@@ -235,7 +304,6 @@ impl FeederState {
     }
 
     fn dock_open_wants_auto_refresh(&self) -> bool {
-        // Caller only polls while dock is open; we just gate on interval.
         match self.last_refresh_at {
             None => !self.loading,
             Some(t) => t.elapsed() >= AUTO_REFRESH && !self.loading,
@@ -245,6 +313,9 @@ impl FeederState {
     /// Whether the event loop should keep ticking for this dock.
     pub fn needs_tick(&self) -> bool {
         if self.loading || self.pending.is_some() || self.last_refresh_at.is_none() {
+            return true;
+        }
+        if self.toast_until.is_some() {
             return true;
         }
         super::media_preview::global_cache()
@@ -301,10 +372,7 @@ impl FeederState {
                     self.move_selection(1, 12);
                     InputOutcome::Changed
                 }
-                MouseEventKind::Down(_) => {
-                    // Click focuses; selection change is handled by AppView hit-test.
-                    InputOutcome::Changed
-                }
+                MouseEventKind::Down(_) => InputOutcome::Changed,
                 _ => InputOutcome::Unchanged,
             },
             Event::Resize(_, _) => InputOutcome::Changed,
@@ -313,18 +381,15 @@ impl FeederState {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> InputOutcome {
-        // q closes dock. Esc is handled by AppView (unfocus first).
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
             && key.modifiers == KeyModifiers::NONE
         {
             return InputOutcome::Action(Action::CloseFeeder);
         }
 
-        // Accept keys with no mods, or only SHIFT (some terminals tag letters).
-        let nav_ok = key.modifiers == KeyModifiers::NONE
-            || key.modifiers == KeyModifiers::SHIFT;
+        let nav_ok =
+            key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT;
 
-        // Navigation — also accept arrows always
         match key.code {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') if nav_ok => {
                 self.move_selection(-1, 12);
@@ -367,8 +432,7 @@ impl FeederState {
                 return InputOutcome::Changed;
             }
             KeyCode::Char('r') | KeyCode::Char('R') if nav_ok => {
-                self.toast = Some("Refreshing…".into());
-                // Allow force refresh even if one is pending by dropping stale? keep simple.
+                self.set_toast("Refreshing…", TOAST_TTL);
                 if self.pending.is_none() {
                     self.start_refresh(None);
                 }
@@ -377,16 +441,14 @@ impl FeederState {
             KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
                 return self.handle_action_key('u');
             }
-            // Swallow Esc here so it never falls through; AppView usually catches first.
             KeyCode::Esc => {
                 self.dock_focused = false;
-                self.toast = Some("Focus: Agent".into());
+                self.set_toast("Focus: Agent", TOAST_TTL);
                 return InputOutcome::Changed;
             }
             _ => {}
         }
 
-        // Card actions — ignore control/alt so we don't steal chorded agent keys if focus glitches
         if key.modifiers == KeyModifiers::NONE
             && let KeyCode::Char(ch) = key.code
         {
@@ -394,7 +456,6 @@ impl FeederState {
             return self.handle_action_key(lower);
         }
 
-        // When focused, consume leftover plain keys so they don't type into the agent.
         if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT {
             return InputOutcome::Unchanged;
         }
@@ -404,79 +465,75 @@ impl FeederState {
     fn handle_action_key(&mut self, ch: char) -> InputOutcome {
         let client = FeedClient::from_env();
         let Some(item) = self.selected_item().cloned() else {
-            self.toast = Some("No card selected".into());
+            self.set_toast("No card selected", TOAST_TTL);
             return InputOutcome::Changed;
         };
 
         match ch {
-            // Use as context — dock stays open; focus returns to agent via AppView
             'u' | 'c' => {
                 let _ = client.post_feedback(&item.id, "context");
                 let prompt = untrusted_context_block(&item);
-                self.toast = Some("Attached to agent · dock stays open".into());
+                self.set_toast("Attached to agent · dock stays open", TOAST_TTL);
                 self.dock_focused = false;
                 InputOutcome::Action(Action::SendPrompt(prompt))
             }
-            // Explain
             'e' => {
                 let _ = client.post_feedback(&item.id, "explain");
                 let prompt = explain_prompt(&item);
-                self.toast = Some("Explain → agent".into());
+                self.set_toast("Explain → agent", TOAST_TTL);
                 self.dock_focused = false;
                 InputOutcome::Action(Action::SendPrompt(prompt))
             }
-            // Discuss (alias)
             'd' => {
                 let _ = client.post_feedback(&item.id, "discuss");
                 let prompt = discuss_prompt(&item);
-                self.toast = Some("Discuss → agent".into());
+                self.set_toast("Discuss → agent", TOAST_TTL);
                 self.dock_focused = false;
                 InputOutcome::Action(Action::SendPrompt(prompt))
             }
-            // store
             's' => {
                 match client.post_feedback(&item.id, "store") {
-                    Ok(()) => self.toast = Some("Stored ✓".into()),
-                    Err(err) => self.toast = Some(format!("Store failed: {err}")),
+                    Ok(()) => self.set_toast("Stored ✓", TOAST_TTL),
+                    Err(err) => self.set_toast(format!("Store failed: {err}"), TOAST_TTL),
                 }
                 InputOutcome::Changed
             }
-            // open link
             'o' => {
                 if let Some(url) = item.open_url() {
                     let _ = client.post_feedback(&item.id, "open");
                     return InputOutcome::Action(Action::OpenUrl(url));
                 }
-                self.toast = Some("No link on this card".into());
+                self.set_toast("No link on this card", TOAST_TTL);
                 InputOutcome::Changed
             }
-            // dismiss
             'x' => {
                 let _ = client.post_feedback(&item.id, "dismiss");
+                self.dismissed.insert(item.id.clone());
                 if let Some(idx) = self.items.iter().position(|i| i.id == item.id) {
                     self.items.remove(idx);
                     if self.selected >= self.items.len() {
                         self.selected = self.items.len().saturating_sub(1);
                     }
                 }
-                self.toast = Some("Dismissed".into());
+                self.set_toast("Dismissed", TOAST_TTL);
                 InputOutcome::Changed
             }
-            // post
             'p' => {
                 let title = format!("Update from {}", client.user_id);
                 let body = "Posted from Feeder.".to_string();
                 match client.post_item(&title, &body, Some("repo:demo")) {
                     Ok(posted) => {
                         self.items.insert(0, posted);
+                        if self.items.len() > DOCK_CAP {
+                            self.items.truncate(DOCK_CAP);
+                        }
                         self.selected = 0;
-                        self.toast = Some("Posted ✓".into());
+                        self.set_toast("Posted ✓", TOAST_TTL);
                     }
-                    Err(err) => self.toast = Some(format!("Post failed: {err}")),
+                    Err(err) => self.set_toast(format!("Post failed: {err}"), TOAST_TTL),
                 }
                 InputOutcome::Changed
             }
-            // media
             'v' => {
                 if let Some(url) = item
                     .media
@@ -486,7 +543,7 @@ impl FeederState {
                 {
                     return InputOutcome::Action(Action::OpenUrl(url));
                 }
-                self.toast = Some("No media URL".into());
+                self.set_toast("No media URL", TOAST_TTL);
                 InputOutcome::Changed
             }
             _ => InputOutcome::Unchanged,
