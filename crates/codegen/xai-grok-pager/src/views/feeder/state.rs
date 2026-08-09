@@ -20,6 +20,8 @@ use super::work_context::WorkContext;
 
 /// Footer toast auto-clear (Dismissed, Stored, etc.).
 const TOAST_TTL: Duration = Duration::from_millis(2500);
+/// Session heartbeat interval — never open a DB conn every TUI frame.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// Live status line lasts a bit longer.
 const TOAST_TTL_STATUS: Duration = Duration::from_secs(6);
 
@@ -77,6 +79,8 @@ pub struct FeederState {
     cold_start: bool,
     /// Kind of in-flight (or last requested) refresh.
     refresh_kind: RefreshKind,
+    /// Last session heartbeat send (throttle DB load on the API).
+    last_heartbeat_at: Option<Instant>,
 }
 
 impl Default for FeederState {
@@ -108,6 +112,7 @@ impl FeederState {
             force_refresh: false,
             cold_start: true,
             refresh_kind: RefreshKind::Replace,
+            last_heartbeat_at: None,
         };
         s.start_refresh(None);
         s
@@ -415,13 +420,20 @@ impl FeederState {
             changed = true;
         }
 
-        // Heartbeat if we have a session (background, fire-and-forget; clone to 'static).
+        // Heartbeat at most every HEARTBEAT_INTERVAL (was every tick → pool meltdown).
         if let Some(sess) = &self.session {
-            let sid = sess.session_id.clone();
-            let client = FeedClient::from_env();
-            let _ = std::thread::spawn(move || {
-                let _ = client.heartbeat(&sid);
-            });
+            let due = self
+                .last_heartbeat_at
+                .map(|t| t.elapsed() >= HEARTBEAT_INTERVAL)
+                .unwrap_or(true);
+            if due {
+                self.last_heartbeat_at = Some(Instant::now());
+                let sid = sess.session_id.clone();
+                let client = FeedClient::from_env();
+                let _ = std::thread::spawn(move || {
+                    let _ = client.heartbeat(&sid);
+                });
+            }
         }
 
         changed
