@@ -8,7 +8,7 @@ use crate::theme::Theme;
 use crate::views::goal_detail::truncate_to_width;
 
 use super::layout::compute_layout;
-use super::media_preview::{global_cache, graphics_available, halfblock_enabled};
+use super::media_preview::{global_cache, halfblock_enabled};
 use super::row::{
     wrap_text, FeedItem, SourceType, MEDIA_PREVIEW_ROWS, MEDIA_PREVIEW_ROWS_SELECTED, POST_GAP,
 };
@@ -40,9 +40,15 @@ pub fn render_feeder(
     let list = layout.list;
     prefetch_media(state);
     ensure_selection_visible(state, list.height, list.width);
-    let escapes = render_posts(buf, list, state, &theme);
+    let mut escapes = String::new();
+    // Always clear absolute Kitty graphics first — prior feeder frames left
+    // images floating outside the dock over the agent pane.
+    escapes.push_str(&crate::terminal::overlay::clear_kitty().into_string());
+    if let Some(e) = render_posts(buf, list, state, &theme) {
+        escapes.push_str(&e);
+    }
     render_footer(buf, layout.footer, state, &theme);
-    (None, escapes)
+    (None, Some(escapes))
 }
 
 fn fill(buf: &mut Buffer, area: Rect, theme: &Theme) {
@@ -407,56 +413,39 @@ fn paint_media(
     if area.width == 0 || area.height == 0 {
         return None;
     }
-    let Some(url) = item.preview_image_url() else {
-        paint_media_card(buf, area, item, c, None);
-        return None;
-    };
+    let url = item.preview_image_url();
 
-    // Kitty / iTerm path
-    if graphics_available() {
-        let cache_arc = global_cache();
-        if let Ok(mut cache) = cache_arc.lock() {
-            if cache.get(&url).is_some() {
-                // Clear cells under image so leftover text doesn't show through
-                let blank = " ".repeat(area.width as usize);
-                for r in 0..area.height {
-                    buf.set_string(
-                        area.x,
-                        area.y + r,
-                        &blank,
-                        Style::default().bg(c.bg),
-                    );
-                }
-                if let Some(esc) = cache.placement_escapes(&url, area) {
-                    return Some(esc);
-                }
-            }
-        }
-    }
+    // IMPORTANT: do NOT use Kitty/iTerm graphics here.
+    // Those are absolute screen placements and float outside the scrollable
+    // Feeder dock (appear "in the background"). Media must live in the
+    // ratatui cell buffer so it scrolls with the panel.
 
-    // Optional half-block (env only)
+    // Optional half-block only if explicitly enabled (still buffer-local).
     if halfblock_enabled() {
-        let cache_arc = global_cache();
-        if let Ok(cache) = cache_arc.lock() {
-            if let Some(hb) = cache.halfblock(&url) {
-                let max_rows = area.height as usize;
-                let max_cols = area.width as usize;
-                for (ri, prow) in hb.rows.iter().take(max_rows).enumerate() {
-                    for (ci, (fg, bg)) in prow.cells.iter().take(max_cols).enumerate() {
-                        if let Some(cell) = buf.cell_mut((area.x + ci as u16, area.y + ri as u16))
-                        {
-                            cell.set_symbol("▀");
-                            cell.set_style(Style::default().fg(*fg).bg(*bg));
+        if let Some(ref u) = url {
+            let cache_arc = global_cache();
+            if let Ok(cache) = cache_arc.lock() {
+                if let Some(hb) = cache.halfblock(u) {
+                    let max_rows = area.height as usize;
+                    let max_cols = area.width as usize;
+                    for (ri, prow) in hb.rows.iter().take(max_rows).enumerate() {
+                        for (ci, (fg, bg)) in prow.cells.iter().take(max_cols).enumerate() {
+                            if let Some(cell) =
+                                buf.cell_mut((area.x + ci as u16, area.y + ri as u16))
+                            {
+                                cell.set_symbol("▀");
+                                cell.set_style(Style::default().fg(*fg).bg(*bg));
+                            }
                         }
                     }
+                    return None;
                 }
-                return None;
             }
         }
     }
 
-    // Clean fallback card — never muddy stretch
-    paint_media_card(buf, area, item, c, Some(&url));
+    // Default: clean media card painted into the dock buffer (scrolls with dock).
+    paint_media_card(buf, area, item, c, url.as_deref());
     None
 }
 

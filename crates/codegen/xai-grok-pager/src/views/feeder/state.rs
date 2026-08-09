@@ -141,7 +141,14 @@ impl FeederState {
                         let mut items = filter_timeline(items);
                         items.truncate(SLATE_LIMIT);
                         let n = items.len();
-                        Ok((items, format!("live · {n} · {base}")))
+                        let qhint = prompts
+                            .first()
+                            .map(|p| {
+                                let t: String = p.chars().take(28).collect();
+                                format!(" · q:{t}")
+                            })
+                            .unwrap_or_default();
+                        Ok((items, format!("live · {n}{qhint}")))
                     }
                     Ok(_) => Err(format!("empty response from {base}")),
                     Err(err) => Err(format!("{err}")),
