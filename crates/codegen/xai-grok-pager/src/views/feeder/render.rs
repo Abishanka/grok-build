@@ -15,9 +15,7 @@ use crate::views::goal_detail::truncate_to_width;
 
 use super::layout::compute_layout;
 use super::media_preview::{global_cache, halfblock_enabled, MediaCache};
-use super::row::{
-    wrap_text, FeedItem, SourceType, MEDIA_PREVIEW_ROWS, MEDIA_PREVIEW_ROWS_SELECTED, POST_GAP,
-};
+use super::row::{wrap_text, FeedItem, SourceType, MEDIA_PREVIEW_ROWS, MEDIA_PREVIEW_ROWS_SELECTED};
 use super::state::FeederState;
 
 /// Render the Feeder dock. Returns optional post-flush Kitty/iTerm escapes.
@@ -44,15 +42,17 @@ pub fn render_feeder(
     render_header(buf, layout.header, state, &theme);
 
     let list = layout.list;
+    // One-post carousel: selection index is the only page.
+    if !state.items.is_empty() {
+        state.selected = state.selected.min(state.items.len() - 1);
+        state.scroll = state.selected;
+    }
     prefetch_media(state);
-    ensure_selection_visible(state, list.height, list.width);
 
     // Order matters for Kitty:
     //   1) begin_frame — full clear on scroll/selection (reset transmitted)
     //   2) place visible media (retransmit after full clear)
     //   3) end_frame — clear ids that left the viewport
-    // Escapes are concatenated clear→place→stale-clear so post-flush never
-    // leaves ghosts over the agent pane.
     let mut escapes = String::new();
     {
         let cache_arc = global_cache();
@@ -61,7 +61,7 @@ pub fn render_feeder(
         }
     }
 
-    let (place_esc, this_frame_ids) = render_posts(buf, list, state, &theme);
+    let (place_esc, this_frame_ids) = render_one_post(buf, list, state, &theme);
     escapes.push_str(&place_esc);
 
     {
@@ -128,48 +128,21 @@ fn prefetch_media(state: &FeederState) {
     let Ok(mut cache) = cache_arc.lock() else {
         return;
     };
-    for item in &state.items {
-        if let Some(url) = item.preview_image_url() {
+    // Only current ±1 for carousel.
+    let n = state.items.len();
+    if n == 0 {
+        return;
+    }
+    let i = state.selected.min(n - 1);
+    for idx in [i.saturating_sub(1), i, (i + 1).min(n - 1)] {
+        if let Some(url) = state.items[idx].preview_image_url() {
             cache.ensure(&url);
         }
     }
 }
 
-fn ensure_selection_visible(state: &mut FeederState, list_h: u16, width: u16) {
-    if state.items.is_empty() || list_h == 0 {
-        return;
-    }
-    let sel = state.selected.min(state.items.len() - 1);
-    state.selected = sel;
-
-    let mut y = 0u16;
-    let mut end = state.scroll;
-    while end < state.items.len() {
-        let h = state.items[end].height_rows(width, end == sel);
-        if y + h > list_h {
-            break;
-        }
-        y += h;
-        end += 1;
-    }
-    if sel >= state.scroll && sel < end {
-        return;
-    }
-
-    let mut start = sel;
-    let mut h = state.items[sel].height_rows(width, true);
-    while start > 0 {
-        let prev = state.items[start - 1].height_rows(width, false);
-        if h + prev > list_h {
-            break;
-        }
-        start -= 1;
-        h += prev;
-    }
-    state.scroll = start;
-}
-
-fn render_posts(
+/// Paint exactly one post (carousel page) filling the list rect.
+fn render_one_post(
     buf: &mut Buffer,
     area: Rect,
     state: &FeederState,
@@ -181,50 +154,55 @@ fn render_posts(
         return (escapes, this_frame);
     }
     if state.items.is_empty() {
+        let msg = if state.loading {
+            "Loading feed…"
+        } else {
+            "No posts — send a prompt or press r"
+        };
         buf.set_string(
             area.x.saturating_add(1),
             area.y,
-            "No posts — refreshing…",
+            msg,
             Style::default().fg(theme.text_secondary).bg(theme.bg_base),
         );
         return (escapes, this_frame);
     }
 
-    let mut y = area.y;
-    let end_y = area.y.saturating_add(area.height);
-    let mut idx = state.scroll;
-    while idx < state.items.len() && y < end_y {
-        let item = &state.items[idx];
-        let selected = idx == state.selected;
-        let h = item.height_rows(area.width, selected);
-        if y + h > end_y && idx != state.scroll {
-            break;
-        }
-        let content_h = h.saturating_sub(POST_GAP).min(end_y.saturating_sub(y));
-        let block = Rect {
-            x: area.x,
-            y,
-            width: area.width,
-            height: content_h,
-        };
-        let (esc, ids) = paint_post(buf, block, item, selected, state.dock_focused, theme, area);
-        escapes.push_str(&esc);
-        this_frame.extend(ids);
-        // Dim separator in the gap
-        if POST_GAP >= 2 && y + content_h + 1 < end_y {
-            let sep_y = y + content_h + 1;
-            let rule = "·".repeat(area.width.saturating_sub(2).max(1) as usize);
-            buf.set_string(
-                area.x.saturating_add(1),
-                sep_y,
-                truncate_to_width(&rule, area.width.saturating_sub(1) as usize),
-                Style::default().fg(theme.gray_dim).bg(theme.bg_base),
-            );
-        }
-        y = y.saturating_add(h);
-        idx += 1;
-    }
+    let idx = state.selected.min(state.items.len() - 1);
+    let item = &state.items[idx];
+    let block = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height,
+    };
+    // Reuse paint_post path — single card, always "selected" chrome when dock focused.
+    let (esc, ids) = paint_post_full(
+        buf,
+        block,
+        item,
+        state.dock_focused,
+        theme,
+        idx,
+        state.items.len(),
+    );
+    escapes.push_str(&esc);
+    this_frame.extend(ids);
     (escapes, this_frame)
+}
+
+fn paint_post_full(
+    buf: &mut Buffer,
+    area: Rect,
+    item: &FeedItem,
+    dock_focused: bool,
+    theme: &Theme,
+    index: usize,
+    total: usize,
+) -> (String, HashSet<u32>) {
+    let _ = (index, total);
+    // Full dock height, always highlighted when dock focused.
+    paint_post(buf, area, item, true, dock_focused, theme, area)
 }
 
 struct CardColors {
@@ -371,14 +349,8 @@ fn paint_post(
         .saturating_sub(row)
         .saturating_sub(reserve)
         .max(1);
-    let max_body = if has_media {
-        if selected { 4 } else { 3 }
-    } else if selected {
-        6
-    } else {
-        4
-    }
-    .min(body_budget as usize);
+    // One-post carousel: use the full dock height for body text.
+    let max_body = (body_budget as usize).max(1);
 
     let body_w = w.saturating_sub(1).max(6);
     let wrapped = wrap_text(item.post_text(), body_w);

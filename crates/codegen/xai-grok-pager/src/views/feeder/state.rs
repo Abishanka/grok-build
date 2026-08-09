@@ -14,18 +14,27 @@ use super::feed_client::{
     discuss_prompt, explain_prompt, untrusted_context_block, FeedClient, SessionInfo,
 };
 use super::row::{
-    filter_timeline, FeedItem, DOCK_CAP, FETCH_BATCH, FETCH_INITIAL,
+    filter_timeline, FeedItem, DOCK_CAP, FETCH_BATCH, FETCH_INITIAL, PREFETCH_FROM_END,
 };
 use super::work_context::WorkContext;
 
-/// How often the dock re-queries the live API while open.
-const AUTO_REFRESH: Duration = Duration::from_secs(25);
 /// Footer toast auto-clear (Dismissed, Stored, etc.).
 const TOAST_TTL: Duration = Duration::from_millis(2500);
 /// Live status line lasts a bit longer.
 const TOAST_TTL_STATUS: Duration = Duration::from_secs(6);
 
-type RefreshMsg = Result<(Vec<FeedItem>, String), String>;
+/// How a successful fetch merges into the carousel buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshKind {
+    /// Cold start / empty → replace list, selected = 0.
+    Replace,
+    /// New search / prompt / r → new posts in front, selected = 0.
+    Prepend,
+    /// Near end of list → append, keep selection.
+    Append,
+}
+
+type RefreshMsg = Result<(Vec<FeedItem>, String, RefreshKind), String>;
 
 /// In-memory state for the Feeder dock.
 #[derive(Debug)]
@@ -64,8 +73,10 @@ pub struct FeederState {
     pub loading: bool,
     /// Force next refresh even if one just finished (after new user prompt).
     force_refresh: bool,
-    /// True until the first successful live merge (use larger fetch).
+    /// True until the first successful live merge.
     cold_start: bool,
+    /// Kind of in-flight (or last requested) refresh.
+    refresh_kind: RefreshKind,
 }
 
 impl Default for FeederState {
@@ -96,6 +107,7 @@ impl FeederState {
             loading: false,
             force_refresh: false,
             cold_start: true,
+            refresh_kind: RefreshKind::Replace,
         };
         s.start_refresh(None);
         s
@@ -106,11 +118,10 @@ impl FeederState {
         self.toast_until = Some(Instant::now() + ttl);
     }
 
-    /// Record a user prompt into the work index and schedule a refresh.
+    /// Record a user prompt into the work index and schedule a **prepend** refresh.
     pub fn note_user_prompt(&mut self, text: &str) {
         self.work.push(text);
         self.force_refresh = true;
-        // Post moment in background (queued with prompts).
         if let Some(sid) = self.session.as_ref().map(|s| s.session_id.clone()) {
             let prompts = self.work.prompts_for_query();
             let client = FeedClient::from_env();
@@ -118,9 +129,7 @@ impl FeederState {
                 let _ = client.post_moment(&sid, &prompts);
             });
         }
-        if self.pending.is_none() {
-            self.start_refresh(None);
-        }
+        self.start_refresh_kind(None, RefreshKind::Prepend);
     }
 
     /// Seed work index from agent prompt history (newest first).
@@ -128,15 +137,37 @@ impl FeederState {
         self.work.seed_from_history(history);
     }
 
-    /// Kick a non-blocking live reload from current work context.
+    /// Kick a non-blocking live reload (default: prepend for `r` / open).
     pub fn start_refresh(&mut self, hint: Option<&str>) {
-        if self.pending.is_some() && !self.force_refresh {
-            return;
-        }
+        let kind = if self.cold_start || self.items.is_empty() {
+            RefreshKind::Replace
+        } else {
+            RefreshKind::Prepend
+        };
+        self.start_refresh_kind(hint, kind);
+    }
+
+    fn start_refresh_kind(&mut self, hint: Option<&str>, kind: RefreshKind) {
+        // Append must not cancel an in-flight prepend/replace.
         if self.pending.is_some() {
-            return;
+            if kind == RefreshKind::Append {
+                return;
+            }
+            if !self.force_refresh && kind != RefreshKind::Replace {
+                return;
+            }
+            // Allow force prepend to wait until current finishes via force_refresh flag.
+            if self.pending.is_some() && kind == RefreshKind::Prepend {
+                self.force_refresh = true;
+                self.refresh_kind = RefreshKind::Prepend;
+                return;
+            }
+            if self.pending.is_some() {
+                return;
+            }
         }
         self.force_refresh = false;
+        self.refresh_kind = kind;
         if let Some(h) = hint {
             self.work.push(h);
         }
@@ -147,7 +178,6 @@ impl FeederState {
             .ok()
             .map(|p| p.display().to_string());
         let workspace_key = super::work_context::workspace_key_from_cwd();
-        // Ensure session once. Failure is non-fatal — still query feed (degraded).
         let session_id = if self.session.is_none() {
             match client.ensure_session(&workspace_key) {
                 Ok(sess) => {
@@ -163,24 +193,27 @@ impl FeederState {
         } else {
             self.session.as_ref().map(|s| s.session_id.clone())
         };
-        // Cold start: fill dock; later refreshes pull a small batch to merge.
-        let fetch_n = if self.cold_start || self.items.is_empty() {
-            FETCH_INITIAL
-        } else {
-            FETCH_BATCH
-        };
+        let fetch_n = FETCH_BATCH.max(FETCH_INITIAL);
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
         self.loading = true;
-        if self.toast.is_none()
-            || self
-                .toast
-                .as_deref()
-                .is_some_and(|t| t.contains("offline") || t.contains("Dismissed"))
-        {
-            self.set_toast(format!("Refreshing · {base}"), TOAST_TTL_STATUS);
+        match kind {
+            RefreshKind::Append => {
+                self.set_toast("loading more…", TOAST_TTL);
+            }
+            RefreshKind::Prepend | RefreshKind::Replace => {
+                if self.toast.is_none()
+                    || self
+                        .toast
+                        .as_deref()
+                        .is_some_and(|t| t.contains("offline") || t.contains("Dismissed"))
+                {
+                    self.set_toast(format!("Refreshing · {base}"), TOAST_TTL_STATUS);
+                }
+            }
         }
         let session_id_for_thread = session_id.clone();
+        let kind_for_thread = kind;
         std::thread::Builder::new()
             .name("feeder-refresh".into())
             .spawn(move || {
@@ -195,8 +228,7 @@ impl FeederState {
                 ) {
                     Ok(items) if !items.is_empty() => {
                         let mut items = filter_timeline(items);
-                        // Don't pre-truncate to DOCK_CAP here — merge handles cap.
-                        items.truncate(fetch_n.max(FETCH_BATCH));
+                        items.truncate(fetch_n);
                         let n = items.len();
                         let qhint = prompts
                             .first()
@@ -205,7 +237,7 @@ impl FeederState {
                                 format!(" · q:{t}")
                             })
                             .unwrap_or_default();
-                        Ok((items, format!("+{n}{qhint}")))
+                        Ok((items, format!("+{n}{qhint}"), kind_for_thread))
                     }
                     Ok(_) => Err(format!("empty response from {base}")),
                     Err(err) => Err(format!("{err}")),
@@ -220,36 +252,84 @@ impl FeederState {
         self.start_refresh(hint);
     }
 
-    /// Prepend `incoming`, keep existing live posts only (never fixtures), cap at [`DOCK_CAP`].
-    fn merge_slate(&mut self, incoming: Vec<FeedItem>) {
-        let mut seen = HashSet::new();
-        let mut out = Vec::with_capacity(DOCK_CAP);
-        for it in incoming {
-            if self.dismissed.contains(&it.id) || is_embedded_fixture(&it) {
-                continue;
-            }
-            if seen.insert(it.id.clone()) {
-                out.push(it);
-            }
-        }
-        // First successful live load: do not keep placeholder/fixture rows.
-        if self.cold_start {
-            out.truncate(DOCK_CAP);
-            self.items = out;
-            self.selected = 0;
-            self.scroll = 0;
+    /// When user is near the end of the carousel, pull the next page.
+    fn maybe_prefetch(&mut self) {
+        if self.loading || self.pending.is_some() || self.items.is_empty() {
             return;
         }
-        for it in self.items.drain(..) {
-            if self.dismissed.contains(&it.id) || is_embedded_fixture(&it) {
-                continue;
+        let n = self.items.len();
+        if n < PREFETCH_FROM_END {
+            return;
+        }
+        // 0-based: 4th of 5 is index 3; trigger when selected >= n - 2
+        if self.selected + PREFETCH_FROM_END >= n {
+            self.start_refresh_kind(None, RefreshKind::Append);
+        }
+    }
+
+    fn merge_slate(&mut self, incoming: Vec<FeedItem>, kind: RefreshKind) {
+        let incoming: Vec<FeedItem> = incoming
+            .into_iter()
+            .filter(|it| !self.dismissed.contains(&it.id) && !is_embedded_fixture(it))
+            .collect();
+        if incoming.is_empty() {
+            return;
+        }
+
+        match kind {
+            RefreshKind::Replace | RefreshKind::Prepend if self.cold_start || self.items.is_empty() => {
+                self.items = incoming;
+                self.items.truncate(DOCK_CAP);
+                self.selected = 0;
+                self.scroll = 0;
+                return;
             }
-            if seen.insert(it.id.clone()) {
-                out.push(it);
+            RefreshKind::Prepend => {
+                let mut seen: HashSet<String> = HashSet::new();
+                let mut out = Vec::with_capacity(DOCK_CAP);
+                for it in incoming {
+                    if seen.insert(it.id.clone()) {
+                        out.push(it);
+                    }
+                }
+                for it in self.items.drain(..) {
+                    if self.dismissed.contains(&it.id) || is_embedded_fixture(&it) {
+                        continue;
+                    }
+                    if seen.insert(it.id.clone()) {
+                        out.push(it);
+                    }
+                }
+                out.truncate(DOCK_CAP);
+                self.items = out;
+                self.selected = 0;
+                self.scroll = 0;
+            }
+            RefreshKind::Append => {
+                let mut seen: HashSet<String> =
+                    self.items.iter().map(|i| i.id.clone()).collect();
+                for it in incoming {
+                    if self.dismissed.contains(&it.id) || is_embedded_fixture(&it) {
+                        continue;
+                    }
+                    if seen.insert(it.id.clone()) {
+                        self.items.push(it);
+                    }
+                }
+                // Drop from the front (already-seen) if over cap; keep selection stable.
+                if self.items.len() > DOCK_CAP {
+                    let drop_n = self.items.len() - DOCK_CAP;
+                    self.items.drain(0..drop_n);
+                    self.selected = self.selected.saturating_sub(drop_n);
+                }
+            }
+            RefreshKind::Replace => {
+                self.items = incoming;
+                self.items.truncate(DOCK_CAP);
+                self.selected = 0;
+                self.scroll = 0;
             }
         }
-        out.truncate(DOCK_CAP);
-        self.items = out;
         if self.selected >= self.items.len() {
             self.selected = self.items.len().saturating_sub(1);
         }
@@ -275,26 +355,20 @@ impl FeederState {
 
         if let Some(rx) = self.pending.take() {
             match rx.try_recv() {
-                Ok(Ok((items, label))) => {
-                    let added = items.len();
-                    self.merge_slate(items);
+                Ok(Ok((items, label, kind))) => {
+                    self.merge_slate(items, kind);
                     self.live = true;
                     self.cold_start = false;
                     self.peek_scroll = 0;
-                    // Don't jump scroll to 0 on every merge — keep place unless empty before
-                    if self.scroll >= self.items.len() {
-                        self.scroll = 0;
-                    }
                     let total = self.items.len();
+                    let i = if total == 0 { 0 } else { self.selected + 1 };
                     self.set_toast(
-                        format!("Feeder · live · {total} · {label}"),
+                        format!("Feeder · {i}/{total} · {label}"),
                         TOAST_TTL_STATUS,
                     );
                     self.loading = false;
                     self.last_refresh_at = Some(Instant::now());
-                    let _ = added;
                     changed = true;
-                    // Post moment in background after successful refresh.
                     if let Some(sid) = self.session.as_ref().map(|s| s.session_id.clone()) {
                         let prompts = self.work.prompts_for_query();
                         let client = FeedClient::from_env();
@@ -303,29 +377,27 @@ impl FeederState {
                         });
                     }
                     if self.force_refresh {
-                        self.start_refresh(None);
+                        self.start_refresh_kind(None, RefreshKind::Prepend);
                     }
                 }
                 Ok(Err(err)) => {
-                    // Stay empty when offline — do NOT inject oauth/pgvector fixtures.
                     self.live = false;
                     self.set_toast(format!("Feeder · offline ({err})"), TOAST_TTL_STATUS);
                     self.loading = false;
                     self.last_refresh_at = Some(Instant::now());
                     changed = true;
                     if self.force_refresh {
-                        self.start_refresh(None);
+                        self.start_refresh_kind(None, RefreshKind::Prepend);
                     }
                 }
                 Err(TryRecvError::Empty) => {
                     self.pending = Some(rx);
-                    if self.spinner_tick % 8 == 0 {
+                    if self.spinner_tick % 8 == 0 && self.refresh_kind != RefreshKind::Append {
                         let dots = match (self.spinner_tick / 8) % 3 {
                             0 => ".",
                             1 => "..",
                             _ => "...",
                         };
-                        // Loading pulse — short sticky while in flight
                         self.toast = Some(format!("Feeder · loading{dots}"));
                         self.toast_until = Some(Instant::now() + Duration::from_secs(2));
                         changed = true;
@@ -338,8 +410,8 @@ impl FeederState {
                     changed = true;
                 }
             }
-        } else if self.force_refresh || self.dock_open_wants_auto_refresh() {
-            self.start_refresh(None);
+        } else if self.force_refresh {
+            self.start_refresh_kind(None, RefreshKind::Prepend);
             changed = true;
         }
 
@@ -353,13 +425,6 @@ impl FeederState {
         }
 
         changed
-    }
-
-    fn dock_open_wants_auto_refresh(&self) -> bool {
-        match self.last_refresh_at {
-            None => !self.loading,
-            Some(t) => t.elapsed() >= AUTO_REFRESH && !self.loading,
-        }
     }
 
     /// Whether the event loop should keep ticking for this dock.
@@ -381,8 +446,8 @@ impl FeederState {
         self.items.get(self.selected)
     }
 
-    /// Move selection by `delta` rows, clamping and keeping selection in view.
-    pub fn move_selection(&mut self, delta: isize, visible_rows: usize) {
+    /// Move carousel by ±1 (one post at a time). Triggers prefetch near the end.
+    pub fn move_selection(&mut self, delta: isize, _visible_rows: usize) {
         if self.items.is_empty() {
             return;
         }
@@ -390,25 +455,19 @@ impl FeederState {
         let next = (self.selected as isize + delta).clamp(0, len - 1) as usize;
         if next != self.selected {
             self.selected = next;
+            self.scroll = next; // keep scroll index in sync for Kitty frame keys
             self.peek_scroll = 0;
-            self.ensure_visible(visible_rows);
+            self.maybe_prefetch();
         }
     }
 
-    /// Keep `selected` inside the visible window of `visible_rows` list rows.
-    pub fn ensure_visible(&mut self, visible_rows: usize) {
-        if visible_rows == 0 || self.items.is_empty() {
+    /// Keep API compat — carousel selection is the only "page".
+    pub fn ensure_visible(&mut self, _visible_rows: usize) {
+        if self.items.is_empty() {
             return;
         }
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if self.selected >= self.scroll + visible_rows {
-            self.scroll = self.selected + 1 - visible_rows;
-        }
-        let max_scroll = self.items.len().saturating_sub(visible_rows);
-        if self.scroll > max_scroll {
-            self.scroll = max_scroll;
-        }
+        self.selected = self.selected.min(self.items.len() - 1);
+        self.scroll = self.selected;
     }
 
     /// Route input while the feeder dock has focus.
@@ -452,11 +511,11 @@ impl FeederState {
                 return InputOutcome::Changed;
             }
             KeyCode::PageUp => {
-                self.move_selection(-8, 12);
+                self.move_selection(-1, 12);
                 return InputOutcome::Changed;
             }
             KeyCode::PageDown => {
-                self.move_selection(8, 12);
+                self.move_selection(1, 12);
                 return InputOutcome::Changed;
             }
             KeyCode::Home => {
@@ -604,7 +663,7 @@ impl FeederState {
 
     /// Footer help line.
     pub fn help_line() -> &'static str {
-        "j/k · u use · e explain · x dismiss · o open · r refresh · Esc agent · q close"
+        "↑↓ / j k · one post · u use · x dismiss · r refresh · q close"
     }
 }
 

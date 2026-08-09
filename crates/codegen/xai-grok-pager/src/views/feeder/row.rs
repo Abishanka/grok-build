@@ -375,12 +375,14 @@ pub const POST_GAP: u16 = 3;
 pub const MEDIA_PREVIEW_ROWS: u16 = 4;
 /// Media slot height when selected.
 pub const MEDIA_PREVIEW_ROWS_SELECTED: u16 = 6;
-/// Max posts held in the dock (ring buffer).
-pub const DOCK_CAP: usize = 20;
-/// How many new ranked posts each refresh pulls (then merge + evict tail).
+/// Max posts held in memory (drop oldest from front when appending past this).
+pub const DOCK_CAP: usize = 30;
+/// Batch size for initial load, new search, and infinite-scroll prefetch.
 pub const FETCH_BATCH: usize = 5;
-/// First open / cold start batch (must stay ≤ API max limit, currently 25).
-pub const FETCH_INITIAL: usize = 10;
+/// Alias — same as batch (one-post carousel never needs a bigger first hit).
+pub const FETCH_INITIAL: usize = FETCH_BATCH;
+/// Prefetch when user is this many posts from the end (4th of 5 → pull more).
+pub const PREFETCH_FROM_END: usize = 2;
 
 /// Backward-compat alias — prefer [`DOCK_CAP`].
 pub const SLATE_LIMIT: usize = DOCK_CAP;
