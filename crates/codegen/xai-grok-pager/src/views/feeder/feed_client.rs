@@ -10,7 +10,8 @@ use serde::Deserialize;
 /// Override with `FEEDER_BASE_URL` / `FEEDER_URL` (see `scripts/start-feeder.sh`).
 pub const DEFAULT_FEEDER_URL: &str = "https://feeder-api-production.up.railway.app";
 
-const TIMEOUT_SECS: u64 = 8;
+// Multi-X fanout + rank often needs >8s; too-low timeout shows as "offline".
+const TIMEOUT_SECS: u64 = 45;
 
 /// Sync client used from the TUI input / open path.
 #[derive(Debug, Clone)]

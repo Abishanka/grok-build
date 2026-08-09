@@ -147,15 +147,18 @@ impl FeederState {
             .ok()
             .map(|p| p.display().to_string());
         let workspace_key = super::work_context::workspace_key_from_cwd();
-        // Ensure session once (idempotent on server).
+        // Ensure session once. Failure is non-fatal — still query feed (degraded).
         let session_id = if self.session.is_none() {
-            if let Ok(sess) = client.ensure_session(&workspace_key) {
-                let sid = sess.session_id.clone();
-                self.session = Some(sess);
-                self.set_toast("session ok".to_string(), TOAST_TTL_STATUS);
-                Some(sid)
-            } else {
-                None
+            match client.ensure_session(&workspace_key) {
+                Ok(sess) => {
+                    let sid = sess.session_id.clone();
+                    self.session = Some(sess);
+                    Some(sid)
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "feeder: ensure_session failed — querying without session");
+                    None
+                }
             }
         } else {
             self.session.as_ref().map(|s| s.session_id.clone())
