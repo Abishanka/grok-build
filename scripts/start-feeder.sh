@@ -96,18 +96,7 @@ if command -v curl >/dev/null 2>&1; then
     echo "  feeder-service: reachable  $body"
   else
     echo "  feeder-service: NOT reachable at $FEEDER_BASE_URL"
-    echo "  (dock shows fixtures, then retries in background)"
-  fi
-  # Warm the catalog so the first /feeder open is fast
-  if curl -sf --connect-timeout 3 --max-time 12 \
-      -X POST "${FEEDER_BASE_URL}/v1/feed/query" \
-      -H "Content-Type: application/json" \
-      -H "X-User-Id: ${FEEDER_USER_ID}" \
-      -d '{"user_id":"'"${FEEDER_USER_ID}"'","limit":5,"context":{"recent_prompts":["rust oauth","coding agent"]}}' \
-      >/dev/null 2>&1; then
-    echo "  feeder-service: feed query ok (catalog warm)"
-  else
-    echo "  feeder-service: feed query slow/failed (dock will retry)"
+    echo "  (dock shows fixtures until API is up; feed fills from your session prompts)"
   fi
   echo
 fi
