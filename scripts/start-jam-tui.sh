@@ -122,6 +122,19 @@ else
   echo "→ --no-checkout: using $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
 fi
 
+# ── load local secrets (.env) for Grok agent keys ─────────────────
+# Feeder hub keys live on Railway. The TUI still needs XAI_API_KEY (or
+# grok login / auth.json) for the coding agent itself.
+if [[ -f "$ROOT/scripts/env.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/env.sh" || true
+elif [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
 # ── env: live feeder ──────────────────────────────────────────────
 if [[ -z "${FEEDER_BASE_URL:-}" ]]; then
   if [[ "$USE_LOCAL" -eq 1 ]]; then
@@ -148,9 +161,29 @@ echo "  FEEDER_BASE_URL: $FEEDER_BASE_URL"
 echo "  FEEDER_USER_ID:  $FEEDER_USER_ID"
 echo "  JAM_ORIGIN:      $JAM_ORIGIN"
 echo "  GROK_FEEDER:     $GROK_FEEDER"
+if [[ -n "${XAI_API_KEY:-}" ]]; then
+  echo "  XAI_API_KEY:     set (${#XAI_API_KEY} chars)"
+elif [[ -f "${HOME}/.grok/auth.json" ]] || [[ -f "${GROK_HOME:-$HOME/.grok}/auth.json" ]]; then
+  echo "  XAI_API_KEY:     unset (will try grok login / auth.json)"
+else
+  echo "  XAI_API_KEY:     UNSET — agent won't auth. Add to .env or: grok login"
+  echo "                   cp .env.example .env && fill XAI_API_KEY, or source scripts/env.sh"
+fi
+if [[ -n "${FEEDER_API_KEY:-}" ]]; then
+  echo "  FEEDER_API_KEY:  set"
+else
+  echo "  FEEDER_API_KEY:  unset (ok if Railway feeder has no FEEDER_API_KEY)"
+fi
 if [[ -n "$JOIN_URL" ]]; then
   echo "  join hint:       /feeder jam join '$JOIN_URL'"
 fi
+echo ""
+echo "How you know it's working:"
+echo "  1) /feeder header shows live (not off) after a few seconds"
+echo "  2) /feeder jam start → toast with https join URL + JAM· badge"
+echo "  3) peer joins → plane strip shows two origins"
+echo "  4) you run a tool turn → peer sees your plane status tool:… + feed cards"
+echo "  5) curl \$FEEDER_BASE_URL/health | grep jams"
 echo ""
 
 # ── health ────────────────────────────────────────────────────────
