@@ -3,6 +3,7 @@ package worker
 
 import (
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,8 @@ type Worker struct {
 	lastQuery    string
 	seenIDs      map[string]bool // posted source urls / post ids
 	seenCards    int
+	// authHoldUntil pauses X recent after 401 so we don't hammer a dead bearer.
+	authHoldUntil time.Time
 	// bgWg tracks optional x_search goroutines (tests can Wait).
 	bgWg sync.WaitGroup
 }
@@ -129,11 +132,29 @@ func (w *Worker) run(meta jamclient.Meta, tips []jamclient.Tip) error {
 	if w.Digest != nil {
 		dig = w.Digest
 	}
-	// Main path: X search/recent (fast). Never blocked by xAI.
-	res := algorithm.Run(in, w.X, dig)
-	w.Log.Printf("braind jam=%s status=%s query=%q reason=%s cards=%d files=%d errs=%d",
-		w.Cfg.JamID, res.Status, res.Query, res.Reason, len(res.Cards),
-		len(res.Distilled.Files), len(res.Distilled.Errors))
+
+	w.mu.Lock()
+	authHeld := !w.authHoldUntil.IsZero() && time.Now().Before(w.authHoldUntil)
+	w.mu.Unlock()
+
+	var res algorithm.Result
+	if authHeld {
+		// Still allow optional xAI path; skip hammering X on known-bad bearer.
+		res = algorithm.Result{Status: "hold", Reason: "X auth hold after 401 (rotate X_BEARER_TOKEN)"}
+		w.Log.Printf("braind jam=%s status=hold reason=%s", w.Cfg.JamID, res.Reason)
+	} else {
+		// Main path: X search/recent (fast). Never blocked by xAI.
+		res = algorithm.Run(in, w.X, dig)
+		w.Log.Printf("braind jam=%s status=%s query=%q reason=%s cards=%d files=%d errs=%d",
+			w.Cfg.JamID, res.Status, res.Query, res.Reason, len(res.Cards),
+			len(res.Distilled.Files), len(res.Distilled.Errors))
+		if res.Status == "hold" && strings.Contains(res.Reason, "401") {
+			w.mu.Lock()
+			w.authHoldUntil = time.Now().Add(10 * time.Minute)
+			w.mu.Unlock()
+			w.Log.Printf("braind jam=%s pausing X recent for 10m after 401", w.Cfg.JamID)
+		}
+	}
 
 	w.mu.Lock()
 	w.lastQuery = res.Query
@@ -146,13 +167,19 @@ func (w *Worker) run(meta jamclient.Meta, tips []jamclient.Tip) error {
 	}
 
 	// Optional background x_search — does not block main path; fail-open.
-	if w.XAISearch != nil && res.Query != "" {
+	if w.XAISearch != nil && (res.Query != "" || meta.ContextUnion != "") {
 		union := res.Distilled.Union
 		if union == "" {
 			union = meta.ContextUnion
 		}
 		q := res.Query
+		if q == "" {
+			q = algorithm.BuildQuery(meta.TopicKeys, union)
+		}
 		keys := append([]string{}, res.Distilled.TopicKeys...)
+		if len(keys) == 0 {
+			keys = append(keys, meta.TopicKeys...)
+		}
 		w.bgWg.Add(1)
 		go func() {
 			defer w.bgWg.Done()

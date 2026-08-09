@@ -1,0 +1,15 @@
+# Default service = jamd (public edge).
+# braind worker: see braind/railway.toml + scripts/deploy-railway.sh
+#
+#   cd sidecar && ./scripts/deploy-railway.sh both
+#   JAM_HOST=https://jamd-production.up.railway.app ./scripts/smoke-prod.sh
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "jamd/Dockerfile"
+
+[deploy]
+startCommand = "/app/jamd"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"

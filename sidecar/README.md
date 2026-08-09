@@ -7,10 +7,13 @@ cd sidecar
 make jam                 # :7720  JAM_ID=demo JAM_TOKEN=dev
 make smoke-jam           # API smoke (server must be up)
 make publish             # push one context as member
+make tui                 # interactive jam-tui (real multi-user client)
+make proof-tui           # two jam-tui --once clients share the room
 open http://127.0.0.1:7720/jam.html?jam=demo
 ```
 
-Binary: `make jam-build` → `bin/jamd`
+Binary: `make jam-build` → `bin/jamd` · `make tui-build` → `bin/jam-tui`  
+TUI wiring notes: [`../docs/TUI-WIRING.md`](../docs/TUI-WIRING.md)
 
 | Env | Purpose |
 |-----|---------|
@@ -71,20 +74,41 @@ Then set Railway/local env `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`.
 Without them, jam is pure in-memory (fine for local).
 
 
-### Railway (live)
+### Railway (live) — off localhost
 
-Project: [disciplined-friendship](https://railway.com/project/a23cd1a7-4043-4c26-b3c5-1796aaace149) · service `jamd`
+Project: [disciplined-friendship](https://railway.com/project/a23cd1a7-4043-4c26-b3c5-1796aaace149)
 
-- Public: https://jamd-production.up.railway.app/health
-- Lurker: https://jamd-production.up.railway.app/jam.html?jam=demo
-- Member: https://jamd-production.up.railway.app/jam.html?jam=demo&token=$JAM_TOKEN
-- `JAM_PUBLIC_RO=1` on Railway → `approve_post` is **blocked** on the public edge (by design). Live approve from a local jamd with `JAM_PUBLIC_RO=0`.
+| Service | Role | URL |
+|---------|------|-----|
+| **jamd** | Public edge (`GET /cards`, lurker, jam API) | https://jamd-production.up.railway.app |
+| **braind** | Private worker → posts research cards to jamd | no public domain |
 
-Redeploy from `sidecar/`:
-```bash
-railway link -p a23cd1a7-4043-4c26-b3c5-1796aaace149 -s jamd -e production
-railway up --service jamd --detach
 ```
+TUI / browser / peek
+        │  HTTPS
+        ▼
+   jamd (public)  ◄── private net ──  braind (worker)
+   :7717 /cards                         JAM_HOST=http://jamd.railway.internal:7717
+```
+
+- Health: https://jamd-production.up.railway.app/health  
+- Lurker: https://jamd-production.up.railway.app/jam.html?jam=demo  
+- Member: https://jamd-production.up.railway.app/jam.html?jam=demo&token=$JAM_TOKEN  
+- Contract: `GET /cards?since=0` · `GET /state` · `POST /jam/demo/context`  
+- `JAM_PUBLIC_RO=1` → `approve_post` blocked on the public edge (by design)
+
+**Deploy both (from `sidecar/`):**
+```bash
+./scripts/deploy-railway.sh both     # jamd from sidecar/, braind from braind/
+./scripts/smoke-prod.sh              # public e2e (room + research)
+# or: make deploy-prod && make smoke-prod
+```
+
+`braind` env is wired to jamd via Railway refs (`JAM_HOST`, `JAM_TOKEN`, `X_*`, `XAI_*`).  
+Research cards also come from jamd’s in-process X worker (OAuth2 user token after Connect X).  
+If braind logs `x search 401`, rotate `X_BEARER_TOKEN` (app-only) on jamd — braind inherits it.
+
+**Do not** deploy the empty `feeder-api` service in the grokathon Railway project for this path.
 
 ### Live X post — OAuth 2.0 (PKCE)
 

@@ -1,0 +1,14 @@
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+tests
+.env
+.env.*
+bin
+.e2e-jamd.log
+.checkpoint-jam-last
+**/__pycache__
+brain
+jamd/tools
+# Keep jamd/ + braind/ + web/ for Docker builds.

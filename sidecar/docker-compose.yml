@@ -1,0 +1,107 @@
+# Code Jam = Go jamd (primary). Solo Python brain optional.
+# Sandbox = Docker code-server via jamd API or compose profile.
+# Redis = optional pub/sub for multi-node SSE fan-out (profile: redis).
+#
+#   docker compose up --build jam
+#   docker compose --profile redis up -d redis
+#   REDIS_URL=redis://127.0.0.1:6379 make jam
+#   JAM_HOST=http://127.0.0.1:7720 JAM_TOKEN=dev make smoke-jam
+
+services:
+  redis:
+    profiles: ["redis"]
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  jam:
+    build:
+      context: .
+      dockerfile: jamd/Dockerfile
+    ports:
+      - "7720:7717"
+    environment:
+      SIDECAR_ADDR: "0.0.0.0"
+      SIDECAR_PORT: "7717"
+      JAM_ID: ${JAM_ID:-demo}
+      JAM_TOKEN: ${JAM_TOKEN:-dev}
+      JAM_ORIGIN: ${JAM_ORIGIN:-host}
+      JAM_PUBLIC_RO: ${JAM_PUBLIC_RO:-1}
+      JAM_REPO_URL: ${JAM_REPO_URL:-}
+      JAM_DEFAULT_BRANCH: ${JAM_DEFAULT_BRANCH:-sidecar-main}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      REDIS_URL: ${REDIS_URL:-}
+      SANDBOX_PASSWORD: ${SANDBOX_PASSWORD:-sidecar}
+      SANDBOX_HOST_PORT: ${SANDBOX_HOST_PORT:-8080}
+      SANDBOX_PUBLIC_HOST: ${SANDBOX_PUBLIC_HOST:-http://127.0.0.1}
+      X_BEARER_TOKEN: ${X_BEARER_TOKEN:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+    # Optional: allow jamd to start code-server containers on host docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7717/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Phase 4 brain worker — posts plane=research cards to jamd (no public port)
+  braind:
+    build:
+      context: ./braind
+      dockerfile: Dockerfile
+    depends_on:
+      jam:
+        condition: service_healthy
+    environment:
+      JAM_HOST: http://jam:7717
+      JAM_ID: ${JAM_ID:-demo}
+      JAM_TOKEN: ${JAM_TOKEN:-dev}
+      X_BEARER_TOKEN: ${X_BEARER_TOKEN:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      BRAIN_POLL_INTERVAL: ${BRAIN_POLL_INTERVAL:-5s}
+      BRAIN_DEBOUNCE: ${BRAIN_DEBOUNCE:-15s}
+      BRAIN_MAX_CARDS: ${BRAIN_MAX_CARDS:-5}
+      BRAIN_ENABLE_XAI_SEARCH: ${BRAIN_ENABLE_XAI_SEARCH:-0}
+    restart: on-failure
+
+  # Optional legacy solo brain (Python) — not required for Code Jam
+  brain:
+    profiles: ["brain"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "brain"]
+    ports:
+      - "7717:7717"
+    environment:
+      SIDECAR_ADDR: "0.0.0.0"
+      SIDECAR_PORT: "7717"
+      SIDECAR_REPO: "/workspace"
+    volumes:
+      - ${SIDECAR_HOST_REPO:-..}:/workspace:ro
+
+  sandbox:
+    profiles: ["sandbox"]
+    image: codercom/code-server:latest
+    ports:
+      - "8080:8080"
+    environment:
+      PASSWORD: ${SANDBOX_PASSWORD:-sidecar}
+    volumes:
+      - jam_workspace:/home/coder/project
+    command:
+      - --bind-addr
+      - 0.0.0.0:8080
+      - --auth
+      - password
+      - /home/coder/project
+
+volumes:
+  jam_workspace:

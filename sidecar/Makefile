@@ -23,6 +23,24 @@ jam-dev:
 jam-build:
 	cd jamd && go build -o ../bin/jamd .
 
+# Interactive multi-user TUI client (wires to jamd; stand-in for /sidecar)
+tui-build:
+	cd tui && go build -o ../bin/jam-tui .
+
+tui: tui-build
+	JAM_HOST=$${JAM_HOST:-http://127.0.0.1:7720} JAM_ID=$${JAM_ID:-demo} JAM_TOKEN=$${JAM_TOKEN:-dev} \
+	  JAM_ORIGIN=$${JAM_ORIGIN:-$$USER} ./bin/jam-tui
+
+tui-once: tui-build
+	JAM_HOST=$${JAM_HOST:-http://127.0.0.1:7720} JAM_ID=$${JAM_ID:-demo} JAM_TOKEN=$${JAM_TOKEN:-dev} \
+	  JAM_ORIGIN=$${JAM_ORIGIN:-$$USER} ./bin/jam-tui --once
+
+proof-tui:
+	./scripts/proof-tui-wire.sh
+
+test-tui:
+	cd tui && go test ./...
+
 # Code Jam brain worker — tips → X research cards → jamd
 # Requires jamd up. Env from ../.env: JAM_HOST, JAM_ID, JAM_TOKEN, X_BEARER_TOKEN, XAI_API_KEY
 braind:
@@ -99,5 +117,26 @@ test-jam:
 test-brain:
 	cd braind && go test ./...
 
+# jamd + tui unit tests
+test-all-go:
+	cd jamd && go test ./...
+	cd tui && go test ./...
+	cd braind && go test ./...
+
 checkpoint-jam:
 	./scripts/checkpoint-jam.sh
+
+# --- production (Railway, not localhost) ---
+deploy-prod:
+	./scripts/deploy-railway.sh both
+
+deploy-prod-jamd:
+	./scripts/deploy-railway.sh jamd
+
+deploy-prod-braind:
+	./scripts/deploy-railway.sh braind
+
+smoke-prod:
+	JAM_HOST=$${JAM_HOST:-https://jamd-production.up.railway.app} \
+	JAM_TOKEN=$${JAM_TOKEN:-dev} \
+	./scripts/smoke-prod.sh
