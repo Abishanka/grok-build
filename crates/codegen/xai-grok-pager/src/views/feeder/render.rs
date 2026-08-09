@@ -635,36 +635,79 @@ fn source_badge(item: &FeedItem) -> String {
 }
 
 fn match_fragment(item: &FeedItem) -> String {
-    // Prefer full match labels — paint_post wraps badge lines instead of truncating.
+    // Prefer full match labels — skip short garbage ("LLM give", "Tell more").
     for chip in item.all_reason_chips() {
         let c = chip.trim();
         if let Some(rest) = c.strip_prefix("Matched:") {
             let t = rest.trim();
-            if !t.is_empty() {
+            if is_good_match_label(t) {
                 return format!("Matched: {}", truncate_plain(t, 48));
             }
         }
-        // pack:term chips from multi-search
         if let Some(rest) = c.strip_prefix("pack:") {
             let t = rest.trim();
-            if !t.is_empty() {
+            if is_good_match_label(t) {
                 return format!("Matched: {}", truncate_plain(t, 48));
             }
         }
     }
-    // Join up to 2 search terms for richer context
-    let terms: Vec<&str> = item
-        .feed
-        .search_terms
-        .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .take(2)
-        .collect();
-    if !terms.is_empty() {
-        return format!("Matched: {}", truncate_plain(&terms.join(" · "), 48));
+    // Best search term (contentful)
+    let mut best = String::new();
+    for t in &item.feed.search_terms {
+        let t = t.trim();
+        if is_good_match_label(t) && t.len() > best.len() {
+            best = t.to_string();
+        }
+    }
+    if !best.is_empty() {
+        return format!("Matched: {}", truncate_plain(&best, 48));
     }
     String::new()
+}
+
+/// Reject filler match labels the API used to emit ("Tell more", "LLM give").
+fn is_good_match_label(s: &str) -> bool {
+    let s = s.trim();
+    if s.len() < 4 {
+        return false;
+    }
+    const STOP: &[&str] = &[
+        "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "is", "it",
+        "this", "that", "with", "from", "me", "my", "tell", "more", "about", "give",
+        "show", "help", "please", "how", "what", "why", "can", "just", "like", "use",
+        "get", "got", "make", "see", "know", "need", "want", "really", "very",
+    ];
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.is_empty() {
+        return false;
+    }
+    let content: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|w| {
+            let wl = w.to_ascii_lowercase();
+            !STOP.contains(&wl.as_str())
+                && (w.len() >= 4
+                    || matches!(
+                        wl.as_str(),
+                        "llm" | "api" | "rag" | "ml" | "ai" | "tui" | "cli" | "gpu"
+                    ))
+        })
+        .collect();
+    if content.is_empty() {
+        return false;
+    }
+    let strong = content.iter().any(|w| w.len() >= 5);
+    if strong {
+        return true;
+    }
+    // Acronym + filler ("LLM give") is not a real match label
+    let has_filler = words.iter().any(|w| STOP.contains(&w.to_ascii_lowercase().as_str()));
+    if has_filler {
+        return false;
+    }
+    // Bare acronym ok only alone
+    content.len() == 1 && words.len() == 1
 }
 
 fn truncate_plain(s: &str, max: usize) -> String {
