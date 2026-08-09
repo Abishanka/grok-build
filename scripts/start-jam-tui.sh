@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Start Grok Build TUI on the jam multiplayer branch, pointed at live feeder.
 #
-# Branch:  sidecar-main  (jam Feeder dock + /feeder jam …)
-# Backend: https://feeder-api-production.up.railway.app  (default)
+# Branch:  george/jam-tui-multiplayer  (jam Feeder dock + /feeder jam …)
+# Backend: https://jam-api-production.up.railway.app  (default)
 #
 # Usage:
 #   ./scripts/start-jam-tui.sh                 # host-ish defaults, production feeder
@@ -24,8 +24,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-BRANCH="${JAM_GIT_BRANCH:-sidecar-main}"
-RAILWAY_DEFAULT="https://feeder-api-production.up.railway.app"
+BRANCH="${JAM_GIT_BRANCH:-george/jam-tui-multiplayer}"
+RAILWAY_DEFAULT="https://jam-api-production.up.railway.app"
 LOCAL_DEFAULT="http://127.0.0.1:8787"
 
 RELEASE=0
