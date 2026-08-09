@@ -277,62 +277,49 @@ fn paint_post(
     if w == 0 {
         return (esc, ids);
     }
-    let mut row = 0u16;
+
+    // --- Layout plan (measure first, then vertically center) ---
+    let body_w = w.saturating_sub(1).max(6);
     let sel_mark = if selected { "›" } else { " " };
 
-    // Author
+    // Title = display name (wraps). Fall back to @handle if empty.
+    let title_raw = {
+        let n = item.display_name();
+        let h = item.handle();
+        if !n.is_empty() && !n.eq_ignore_ascii_case(&h) {
+            format!("{sel_mark}{n}")
+        } else {
+            format!("{sel_mark}@{h}")
+        }
+    };
+    let title_lines = wrap_text(&title_raw, body_w);
+
+    // Meta: @handle · time (wraps if needed)
     let handle = item.handle();
     let time = item.relative_time();
-    let handle_budget = w.saturating_sub(10).max(4);
-    let handle_disp = truncate_to_width(&handle, handle_budget);
-    let author = if time.is_empty() {
-        format!("{sel_mark}@{handle_disp}")
+    let meta_raw = if time.is_empty() {
+        format!("@{handle}")
     } else {
-        format!("{sel_mark}@{handle_disp} · {time}")
+        format!("@{handle} · {time}")
     };
-    buf.set_string(
-        text_x,
-        area.y + row,
-        truncate_to_width(&author, w),
-        Style::default()
-            .fg(c.author)
-            .bg(c.bg)
-            .add_modifier(if selected {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            }),
-    );
-    row += 1;
-    if row >= area.height {
-        return (esc, ids);
-    }
+    // Skip meta if title already is just @handle
+    let show_meta = !title_raw.trim_start_matches(sel_mark).eq_ignore_ascii_case(&format!("@{handle}"));
+    let meta_lines: Vec<String> = if show_meta {
+        wrap_text(&meta_raw, body_w)
+    } else {
+        Vec::new()
+    };
 
-    // Badge
-    {
-        let badge = source_badge(item);
-        let matched = match_fragment(item);
-        let why = if matched.is_empty() {
-            badge
-        } else {
-            format!("{badge} · {matched}")
-        };
-        buf.set_string(
-            text_x,
-            area.y + row,
-            truncate_to_width(&why, w),
-            Style::default()
-                .fg(c.badge)
-                .bg(c.bg)
-                .add_modifier(Modifier::BOLD),
-        );
-        row += 1;
-        if row >= area.height {
-            return (esc, ids);
-        }
-    }
+    // Badge (wraps — never hard-truncate the match label)
+    let badge = source_badge(item);
+    let matched = match_fragment(item);
+    let why = if matched.is_empty() {
+        badge
+    } else {
+        format!("{badge} · {matched}")
+    };
+    let badge_lines = wrap_text(&why, body_w);
 
-    // Hard reserve: metrics (1) + media (optional)
     let has_media = item.has_visual_media();
     let media_rows = if has_media {
         if selected {
@@ -343,18 +330,86 @@ fn paint_post(
     } else {
         0
     };
-    let reserve = 1u16 + media_rows;
-    let body_budget = area
-        .height
-        .saturating_sub(row)
-        .saturating_sub(reserve)
-        .max(1);
-    // One-post carousel: use the full dock height for body text.
-    let max_body = (body_budget as usize).max(1);
 
-    let body_w = w.saturating_sub(1).max(6);
-    let wrapped = wrap_text(item.post_text(), body_w);
-    for line in wrapped.iter().take(max_body) {
+    // Fixed chrome rows: title + meta + badge + metrics(1) + media
+    let chrome = (title_lines.len() + meta_lines.len() + badge_lines.len()) as u16
+        + 1u16 // metrics
+        + media_rows;
+    let body_budget = area.height.saturating_sub(chrome).max(1) as usize;
+    let wrapped_body = wrap_text(item.post_text(), body_w);
+    let body_take = wrapped_body.len().min(body_budget).max(1.min(wrapped_body.len()));
+
+    // Planned content height for vertical centering
+    let content_h = (title_lines.len()
+        + meta_lines.len()
+        + badge_lines.len()
+        + body_take
+        + media_rows as usize
+        + 1) as u16; // +1 metrics
+    let top_pad = if content_h < area.height {
+        (area.height - content_h) / 2
+    } else {
+        0
+    };
+
+    let mut row = top_pad;
+    let title_style = Style::default()
+        .fg(c.author)
+        .bg(c.bg)
+        .add_modifier(if selected {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+
+    // Title lines (wrapped)
+    for line in &title_lines {
+        if row >= area.height {
+            return (esc, ids);
+        }
+        buf.set_string(
+            text_x,
+            area.y + row,
+            truncate_to_width(line, w),
+            title_style,
+        );
+        row += 1;
+    }
+
+    // Meta (@handle · time)
+    for line in &meta_lines {
+        if row >= area.height {
+            return (esc, ids);
+        }
+        buf.set_string(
+            text_x,
+            area.y + row,
+            truncate_to_width(line, w),
+            Style::default().fg(c.dim).bg(c.bg),
+        );
+        row += 1;
+    }
+
+    // Badge (wrapped)
+    for line in &badge_lines {
+        if row >= area.height {
+            return (esc, ids);
+        }
+        buf.set_string(
+            text_x,
+            area.y + row,
+            truncate_to_width(line, w),
+            Style::default()
+                .fg(c.badge)
+                .bg(c.bg)
+                .add_modifier(Modifier::BOLD),
+        );
+        row += 1;
+    }
+
+    // Body
+    let reserve = 1u16 + media_rows;
+    for line in wrapped_body.iter().take(body_take) {
         if row >= area.height.saturating_sub(reserve) {
             break;
         }
@@ -367,7 +422,7 @@ fn paint_post(
         row += 1;
     }
 
-    // Media slot (before metrics) — never steals metrics row
+    // Media slot (before metrics)
     if media_rows > 0 {
         let room_after_metrics = area.height.saturating_sub(row).saturating_sub(1);
         let avail = room_after_metrics.min(media_rows);
@@ -378,7 +433,6 @@ fn paint_post(
                 width: area.width.saturating_sub(2),
                 height: avail,
             };
-            // Clip to list viewport so placements never sit outside the dock list.
             if let Some(clipped) = intersect_rect(media_area, list_clip) {
                 if clipped.height >= 2 && clipped.width >= 4 {
                     let (m_esc, m_ids) = paint_media(buf, clipped, item, &c);
@@ -390,7 +444,7 @@ fn paint_post(
         }
     }
 
-    // Metrics — always last content row inside the card
+    // Metrics
     if row < area.height {
         let m = &item.metrics;
         let metrics = format!(
@@ -581,20 +635,34 @@ fn source_badge(item: &FeedItem) -> String {
 }
 
 fn match_fragment(item: &FeedItem) -> String {
+    // Prefer full match labels — paint_post wraps badge lines instead of truncating.
     for chip in item.all_reason_chips() {
         let c = chip.trim();
         if let Some(rest) = c.strip_prefix("Matched:") {
             let t = rest.trim();
             if !t.is_empty() {
-                return format!("Matched: {}", truncate_plain(t, 22));
+                return format!("Matched: {}", truncate_plain(t, 48));
+            }
+        }
+        // pack:term chips from multi-search
+        if let Some(rest) = c.strip_prefix("pack:") {
+            let t = rest.trim();
+            if !t.is_empty() {
+                return format!("Matched: {}", truncate_plain(t, 48));
             }
         }
     }
-    if let Some(t) = item.feed.search_terms.first() {
-        let t = t.trim();
-        if !t.is_empty() {
-            return format!("Matched: {}", truncate_plain(t, 22));
-        }
+    // Join up to 2 search terms for richer context
+    let terms: Vec<&str> = item
+        .feed
+        .search_terms
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .take(2)
+        .collect();
+    if !terms.is_empty() {
+        return format!("Matched: {}", truncate_plain(&terms.join(" · "), 48));
     }
     String::new()
 }

@@ -28,6 +28,55 @@ impl Default for FeedClient {
     }
 }
 
+fn default_feeder_user_id() -> String {
+    if let Ok(u) = std::env::var("FEEDER_USER_ID") {
+        let u = u.trim().to_string();
+        if !u.is_empty() {
+            return u;
+        }
+    }
+    let host = hostname_slug();
+    let who = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "user".into());
+    let who = slug_part(&who);
+    format!("{host}-{who}")
+}
+
+fn hostname_slug() -> String {
+    let raw = std::process::Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    let s = slug_part(raw.trim());
+    if s.is_empty() {
+        "device".into()
+    } else {
+        s
+    }
+}
+
+fn slug_part(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_dash = false;
+    for c in s.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
 impl FeedClient {
     pub fn new(base_url: impl Into<String>, user_id: impl Into<String>) -> Self {
         Self {
@@ -41,7 +90,7 @@ impl FeedClient {
         let base = std::env::var("FEEDER_BASE_URL")
             .or_else(|_| std::env::var("FEEDER_URL"))
             .unwrap_or_else(|_| DEFAULT_FEEDER_URL.to_string());
-        let user = std::env::var("FEEDER_USER_ID").unwrap_or_else(|_| "local".to_string());
+        let user = default_feeder_user_id();
         let mut c = Self::new(base, user);
         c.api_key = std::env::var("FEEDER_API_KEY").ok().filter(|s| !s.is_empty());
         c

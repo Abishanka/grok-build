@@ -9,7 +9,7 @@
 #
 # Env:
 #   FEEDER_BASE_URL   default https://feeder-api-production.up.railway.app
-#   FEEDER_USER_ID    <device-name>-local
+#   FEEDER_USER_ID    <device-name>-<whoami>  (set FEEDER_USER_ID=alice for two-person demo)
 #   FEEDER_API_KEY    optional
 
 set -euo pipefail
@@ -50,7 +50,11 @@ Usage:
   ./scripts/start-feeder.sh              # Railway production API
   ./scripts/start-feeder.sh --local      # http://127.0.0.1:8787
   FEEDER_BASE_URL=https://… ./scripts/start-feeder.sh
+  FEEDER_USER_ID=alice ./scripts/start-feeder.sh   # two-person demo identity
   ./scripts/start-feeder.sh --release
+
+Env:
+  FEEDER_USER_ID=alice   override identity (useful for two-person demo)
 
 In TUI:
   open a coding session, then /feeder
@@ -78,15 +82,15 @@ if [[ -z "${FEEDER_BASE_URL:-}" ]]; then
     export FEEDER_BASE_URL="$RAILWAY_DEFAULT"
   fi
 fi
-export FEEDER_USER_ID="${FEEDER_USER_ID:-$(device_name)-local}"
+export FEEDER_USER_ID="${FEEDER_USER_ID:-$(device_name)-$(whoami 2>/dev/null || echo user)}"
 export FEEDER_API_KEY="${FEEDER_API_KEY:-}"
 export FEEDER_URL="${FEEDER_URL:-$FEEDER_BASE_URL}"
 # Ensure the Rust client sees the same URL even if something unsets FEEDER_BASE_URL later
 export GROK_FEEDER="${GROK_FEEDER:-1}"
 
 echo "Feeder TUI"
-echo "  FEEDER_BASE_URL=$FEEDER_BASE_URL"
-echo "  FEEDER_USER_ID=$FEEDER_USER_ID"
+echo "  you:              $FEEDER_USER_ID"
+echo "  FEEDER_BASE_URL=  $FEEDER_BASE_URL"
 echo "  cwd=$ROOT"
 echo "  /feeder opens dock focused · j/k · u use · Esc agent · q close"
 echo
