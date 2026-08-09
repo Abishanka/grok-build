@@ -22,6 +22,7 @@ pub mod peek;
 pub mod render;
 pub mod row;
 pub mod state;
+pub mod work_context;
 
 pub use render::render_feeder;
 pub use row::{

@@ -2,7 +2,7 @@
 
 use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView, TrustState};
-use crate::views::feeder::{FeederState, feeder_enabled};
+use crate::views::feeder::{feeder_enabled, FeederState};
 
 /// Toggle the Feeder **dock** (right column). Does not replace the agent view.
 pub(super) fn dispatch_open_feeder(app: &mut AppView) -> Vec<Effect> {
@@ -30,7 +30,6 @@ pub(super) fn dispatch_open_feeder(app: &mut AppView) -> Vec<Effect> {
 
     // Dock only makes sense beside an agent session
     if !matches!(app.active_view, ActiveView::Agent(_)) {
-        // If stuck on legacy full-screen Feeder enum, leave it
         if matches!(app.active_view, ActiveView::Feeder) {
             app.active_view = preferred_agent_view(app);
         } else {
@@ -39,21 +38,36 @@ pub(super) fn dispatch_open_feeder(app: &mut AppView) -> Vec<Effect> {
         }
     }
 
+    // Seed work context from the active agent's prompt history
+    let history: Vec<String> = match app.active_view {
+        ActiveView::Agent(id) => app
+            .agents
+            .get(&id)
+            .map(|a| {
+                a.combined_prompt_history()
+                    .into_iter()
+                    .map(|e| e.text)
+                    .take(12)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
     if app.feeder.is_none() {
         app.feeder = Some(FeederState::new());
-    } else if let Some(f) = app.feeder.as_mut() {
-        // Soft refresh when reopening
-        f.refresh_from_service(None);
+    }
+    if let Some(f) = app.feeder.as_mut() {
+        if !history.is_empty() {
+            f.seed_work_history(&history);
+        }
+        f.dock_focused = true;
+        f.start_refresh(None);
     }
 
     app.feeder_dock_open = true;
     app.feeder_focused = true;
-    if let Some(f) = app.feeder.as_mut() {
-        f.dock_focused = true;
-        // Soft non-blocking refresh every time the dock opens
-        f.start_refresh(None);
-    }
-    app.show_toast("Feeder focused · j/k move · u use · e explain · x dismiss · Esc agent · q close");
+    app.show_toast("Feeder focused · j/k · tracks your prompts · u use · q close");
     vec![]
 }
 
@@ -69,10 +83,24 @@ fn preferred_agent_view(app: &AppView) -> ActiveView {
 pub(super) fn dispatch_close_feeder(app: &mut AppView) -> Vec<Effect> {
     app.feeder_dock_open = false;
     app.feeder_focused = false;
-    // Leave legacy full-screen mode if somehow active
     if matches!(app.active_view, ActiveView::Feeder) {
         app.active_view = preferred_agent_view(app);
     }
     app.feeder_return = None;
     vec![]
+}
+
+/// Called when the user sends a prompt — update Feeder work index + refresh if open.
+pub(super) fn feeder_on_user_prompt(app: &mut AppView, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    // Always keep work index warm if feeder state exists or dock is open
+    if app.feeder.is_none() && !app.feeder_dock_open {
+        // Lazy-create so context accumulates even before first /feeder
+        app.feeder = Some(FeederState::new());
+    }
+    if let Some(f) = app.feeder.as_mut() {
+        f.note_user_prompt(text);
+    }
 }

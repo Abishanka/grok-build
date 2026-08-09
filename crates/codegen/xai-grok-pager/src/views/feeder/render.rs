@@ -1,4 +1,4 @@
-//! Feeder dock paint — X-style multi-line posts with color + image previews.
+//! Feeder dock paint — spaced cards, color accents, clean media.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -8,18 +8,21 @@ use crate::theme::Theme;
 use crate::views::goal_detail::truncate_to_width;
 
 use super::layout::compute_layout;
-use super::media_preview::global_cache;
+use super::media_preview::{global_cache, graphics_available, halfblock_enabled};
 use super::row::{
     wrap_text, FeedItem, SourceType, MEDIA_PREVIEW_ROWS, MEDIA_PREVIEW_ROWS_SELECTED, POST_GAP,
 };
 use super::state::FeederState;
 
-/// Render the Feeder dock into `buf`.
-pub fn render_feeder(buf: &mut Buffer, area: Rect, state: &mut FeederState) -> Option<(u16, u16)> {
+/// Render the Feeder dock. Returns optional post-flush Kitty/iTerm escapes.
+pub fn render_feeder(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &mut FeederState,
+) -> (Option<(u16, u16)>, Option<String>) {
     let theme = Theme::current();
     fill(buf, area, &theme);
 
-    // Vertical border on the left edge of the dock
     let border = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
     for row in 0..area.height {
         buf.set_string(area.x, area.y + row, "│", border);
@@ -35,12 +38,11 @@ pub fn render_feeder(buf: &mut Buffer, area: Rect, state: &mut FeederState) -> O
     render_header(buf, layout.header, state, &theme);
 
     let list = layout.list;
-    // Kick image downloads for visible cards before paint.
-    prefetch_media(state, list.width);
+    prefetch_media(state);
     ensure_selection_visible(state, list.height, list.width);
-    render_posts(buf, list, state, &theme);
+    let escapes = render_posts(buf, list, state, &theme);
     render_footer(buf, layout.footer, state, &theme);
-    None
+    (None, escapes)
 }
 
 fn fill(buf: &mut Buffer, area: Rect, theme: &Theme) {
@@ -87,20 +89,14 @@ fn render_header(buf: &mut Buffer, area: Rect, state: &FeederState, theme: &Them
     );
 }
 
-fn prefetch_media(state: &FeederState, width: u16) {
+fn prefetch_media(state: &FeederState) {
     let cache_arc = global_cache();
     let Ok(mut cache) = cache_arc.lock() else {
         return;
     };
-    let cols = width.saturating_sub(3).max(12);
-    for (i, item) in state.items.iter().enumerate() {
+    for item in &state.items {
         if let Some(url) = item.preview_image_url() {
-            let rows = if i == state.selected {
-                MEDIA_PREVIEW_ROWS_SELECTED
-            } else {
-                MEDIA_PREVIEW_ROWS
-            };
-            cache.ensure(&url, cols, rows);
+            cache.ensure(&url);
         }
     }
 }
@@ -139,9 +135,14 @@ fn ensure_selection_visible(state: &mut FeederState, list_h: u16, width: u16) {
     state.scroll = start;
 }
 
-fn render_posts(buf: &mut Buffer, area: Rect, state: &FeederState, theme: &Theme) {
+fn render_posts(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &FeederState,
+    theme: &Theme,
+) -> Option<String> {
     if area.height == 0 || area.width == 0 {
-        return;
+        return None;
     }
     if state.items.is_empty() {
         buf.set_string(
@@ -150,9 +151,10 @@ fn render_posts(buf: &mut Buffer, area: Rect, state: &FeederState, theme: &Theme
             "No posts — refreshing…",
             Style::default().fg(theme.text_secondary).bg(theme.bg_base),
         );
-        return;
+        return None;
     }
 
+    let mut escapes = String::new();
     let mut y = area.y;
     let end_y = area.y.saturating_add(area.height);
     let mut idx = state.scroll;
@@ -170,13 +172,30 @@ fn render_posts(buf: &mut Buffer, area: Rect, state: &FeederState, theme: &Theme
             width: area.width,
             height: content_h,
         };
-        paint_post(buf, block, item, selected, state.dock_focused, theme);
+        if let Some(esc) = paint_post(buf, block, item, selected, state.dock_focused, theme) {
+            escapes.push_str(&esc);
+        }
+        // Dim separator in the gap
+        if POST_GAP >= 2 && y + content_h + 1 < end_y {
+            let sep_y = y + content_h + 1;
+            let rule = "·".repeat(area.width.saturating_sub(2).max(1) as usize);
+            buf.set_string(
+                area.x.saturating_add(1),
+                sep_y,
+                truncate_to_width(&rule, area.width.saturating_sub(1) as usize),
+                Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+            );
+        }
         y = y.saturating_add(h);
         idx += 1;
     }
+    if escapes.is_empty() {
+        None
+    } else {
+        Some(escapes)
+    }
 }
 
-/// Source-specific palette.
 struct CardColors {
     accent: Color,
     badge: Color,
@@ -188,11 +207,8 @@ struct CardColors {
 
 fn card_colors(item: &FeedItem, selected: bool, dock_focused: bool, theme: &Theme) -> CardColors {
     let (accent, badge) = match item.kind() {
-        // X.com — sky / cyan
         SourceType::XPost => (Color::Rgb(29, 155, 240), Color::Rgb(29, 155, 240)),
-        // AI — violet
         SourceType::SyntheticPost => (Color::Rgb(168, 85, 247), Color::Rgb(192, 132, 252)),
-        // You — green
         SourceType::UserPost => (theme.accent_success, theme.accent_success),
         SourceType::Other => (theme.text_secondary, theme.text_secondary),
     };
@@ -224,9 +240,9 @@ fn paint_post(
     selected: bool,
     dock_focused: bool,
     theme: &Theme,
-) {
+) -> Option<String> {
     if area.height == 0 || area.width == 0 {
-        return;
+        return None;
     }
     let c = card_colors(item, selected, dock_focused, theme);
     let blank = " ".repeat(area.width as usize);
@@ -235,7 +251,6 @@ fn paint_post(
         buf.set_string(area.x, area.y + row, &blank, base);
     }
 
-    // Left accent bar (1 col) — color-codes X vs AI vs You
     for row in 0..area.height {
         buf.set_string(
             area.x,
@@ -248,7 +263,7 @@ fn paint_post(
     let text_x = area.x.saturating_add(2);
     let w = area.width.saturating_sub(2) as usize;
     if w == 0 {
-        return;
+        return None;
     }
     let mut row = 0u16;
     let sel_mark = if selected { "›" } else { " " };
@@ -278,15 +293,15 @@ fn paint_post(
     );
     row += 1;
     if row >= area.height {
-        return;
+        return None;
     }
 
-    // Source badge — colored
+    // Badge
     {
         let badge = source_badge(item);
         let matched = match_fragment(item);
         let why = if matched.is_empty() {
-            badge.clone()
+            badge
         } else {
             format!("{badge} · {matched}")
         };
@@ -301,12 +316,13 @@ fn paint_post(
         );
         row += 1;
         if row >= area.height {
-            return;
+            return None;
         }
     }
 
-    // Body — display-width wrap; leave room for media + metrics
-    let media_rows = if item.has_visual_media() {
+    // Hard reserve: metrics (1) + media (optional)
+    let has_media = item.has_visual_media();
+    let media_rows = if has_media {
         if selected {
             MEDIA_PREVIEW_ROWS_SELECTED
         } else {
@@ -315,13 +331,25 @@ fn paint_post(
     } else {
         0
     };
-    let reserve = 1u16 + media_rows; // metrics + media
-    let body_budget = area.height.saturating_sub(row).saturating_sub(reserve).max(1);
+    let reserve = 1u16 + media_rows;
+    let body_budget = area
+        .height
+        .saturating_sub(row)
+        .saturating_sub(reserve)
+        .max(1);
+    let max_body = if has_media {
+        if selected { 4 } else { 3 }
+    } else if selected {
+        6
+    } else {
+        4
+    }
+    .min(body_budget as usize);
+
     let body_w = w.saturating_sub(1).max(6);
     let wrapped = wrap_text(item.post_text(), body_w);
-    let max_body = (if selected { 8 } else { 5 }).min(body_budget as usize);
     for line in wrapped.iter().take(max_body) {
-        if row >= area.height {
+        if row >= area.height.saturating_sub(reserve) {
             break;
         }
         buf.set_string(
@@ -333,22 +361,24 @@ fn paint_post(
         row += 1;
     }
 
-    // Image preview (half-block) or placeholder
-    if media_rows > 0 && row < area.height {
-        let avail = area.height.saturating_sub(row).saturating_sub(1).min(media_rows);
-        if avail > 0 {
+    // Media slot (before metrics) — never steals metrics row
+    let mut media_esc = None;
+    if media_rows > 0 {
+        let room_after_metrics = area.height.saturating_sub(row).saturating_sub(1);
+        let avail = room_after_metrics.min(media_rows);
+        if avail >= 2 {
             let media_area = Rect {
                 x: text_x,
                 y: area.y + row,
                 width: area.width.saturating_sub(2),
                 height: avail,
             };
-            paint_media(buf, media_area, item, &c);
+            media_esc = paint_media(buf, media_area, item, &c);
             row = row.saturating_add(avail);
         }
     }
 
-    // Metrics
+    // Metrics — always last content row inside the card
     if row < area.height {
         let m = &item.metrics;
         let metrics = format!(
@@ -364,70 +394,129 @@ fn paint_post(
             Style::default().fg(c.dim).bg(c.bg),
         );
     }
+
+    media_esc
 }
 
-fn paint_media(buf: &mut Buffer, area: Rect, item: &FeedItem, c: &CardColors) {
+fn paint_media(
+    buf: &mut Buffer,
+    area: Rect,
+    item: &FeedItem,
+    c: &CardColors,
+) -> Option<String> {
     if area.width == 0 || area.height == 0 {
-        return;
+        return None;
     }
     let Some(url) = item.preview_image_url() else {
-        return;
+        paint_media_card(buf, area, item, c, None);
+        return None;
     };
 
-    let cache_arc = global_cache();
-    if let Ok(cache) = cache_arc.lock() {
-        if let Some(preview) = cache.get(&url) {
-            let max_rows = area.height as usize;
-            let max_cols = area.width as usize;
-            for (ri, prow) in preview.rows.iter().take(max_rows).enumerate() {
-                for (ci, (fg, bg)) in prow.cells.iter().take(max_cols).enumerate() {
-                    if let Some(cell) = buf.cell_mut((area.x + ci as u16, area.y + ri as u16)) {
-                        cell.set_symbol("▀");
-                        cell.set_style(Style::default().fg(*fg).bg(*bg));
-                    }
+    // Kitty / iTerm path
+    if graphics_available() {
+        let cache_arc = global_cache();
+        if let Ok(mut cache) = cache_arc.lock() {
+            if cache.get(&url).is_some() {
+                // Clear cells under image so leftover text doesn't show through
+                let blank = " ".repeat(area.width as usize);
+                for r in 0..area.height {
+                    buf.set_string(
+                        area.x,
+                        area.y + r,
+                        &blank,
+                        Style::default().bg(c.bg),
+                    );
+                }
+                if let Some(esc) = cache.placement_escapes(&url, area) {
+                    return Some(esc);
                 }
             }
-            return;
         }
     }
 
-    // Loading / no-preview fallback
+    // Optional half-block (env only)
+    if halfblock_enabled() {
+        let cache_arc = global_cache();
+        if let Ok(cache) = cache_arc.lock() {
+            if let Some(hb) = cache.halfblock(&url) {
+                let max_rows = area.height as usize;
+                let max_cols = area.width as usize;
+                for (ri, prow) in hb.rows.iter().take(max_rows).enumerate() {
+                    for (ci, (fg, bg)) in prow.cells.iter().take(max_cols).enumerate() {
+                        if let Some(cell) = buf.cell_mut((area.x + ci as u16, area.y + ri as u16))
+                        {
+                            cell.set_symbol("▀");
+                            cell.set_style(Style::default().fg(*fg).bg(*bg));
+                        }
+                    }
+                }
+                return None;
+            }
+        }
+    }
+
+    // Clean fallback card — never muddy stretch
+    paint_media_card(buf, area, item, c, Some(&url));
+    None
+}
+
+fn paint_media_card(
+    buf: &mut Buffer,
+    area: Rect,
+    item: &FeedItem,
+    c: &CardColors,
+    url: Option<&str>,
+) {
     let label = item
         .media
         .0
         .iter()
         .find_map(|m| m.hint())
-        .unwrap_or_else(|| "▣ image".into());
+        .unwrap_or_else(|| "▣ media".into());
     let host = url
+        .unwrap_or("")
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .split('/')
         .next()
         .unwrap_or("media");
-    // Draw a framed placeholder so the card still "has" an image slot
+    let w = area.width as usize;
+    let inner = w.saturating_sub(2);
     for r in 0..area.height {
         let line = if r == 0 {
-            format!("┌{}┐", "─".repeat(area.width.saturating_sub(2) as usize))
+            format!("┌{}┐", "─".repeat(inner))
         } else if r + 1 == area.height {
-            format!("└{}┘", "─".repeat(area.width.saturating_sub(2) as usize))
-        } else if r == area.height / 2 {
-            let mid = format!(" {label} · {host} ");
-            let inner_w = area.width.saturating_sub(2) as usize;
-            let mid_t = truncate_to_width(&mid, inner_w);
-            let pad = inner_w.saturating_sub(unicode_width::UnicodeWidthStr::width(mid_t.as_str()));
-            let left = pad / 2;
-            let right = pad - left;
-            format!("│{}{}{}│", " ".repeat(left), mid_t, " ".repeat(right))
+            format!("└{}┘", "─".repeat(inner))
+        } else if r == 1 {
+            let mid = format!(" {label} ");
+            pad_center(&mid, inner)
+        } else if r == 2 && area.height > 3 {
+            let mid = format!(" {host} ");
+            pad_center(&truncate_to_width(&mid, inner), inner)
+        } else if r + 1 == area.height.saturating_sub(1) && area.height > 4 {
+            pad_center(" o open · v media ", inner)
         } else {
-            format!("│{}│", " ".repeat(area.width.saturating_sub(2) as usize))
+            format!("│{}│", " ".repeat(inner))
         };
         buf.set_string(
             area.x,
             area.y + r,
-            truncate_to_width(&line, area.width as usize),
+            truncate_to_width(&line, w),
             Style::default().fg(c.dim).bg(c.bg),
         );
     }
+}
+
+fn pad_center(mid: &str, inner: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let mw = UnicodeWidthStr::width(mid);
+    if mw >= inner {
+        return format!("│{}│", truncate_to_width(mid, inner));
+    }
+    let pad = inner - mw;
+    let left = pad / 2;
+    let right = pad - left;
+    format!("│{}{}{}│", " ".repeat(left), mid, " ".repeat(right))
 }
 
 fn source_badge(item: &FeedItem) -> String {

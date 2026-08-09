@@ -345,9 +345,17 @@ impl FeedItem {
         // content width: leave 1 col for left accent bar + 1 pad
         let w = width.saturating_sub(3).max(8) as usize;
         let body_lines = wrap_text(self.post_text(), w);
-        let max_body = if selected { 8 } else { 5 };
+        let has_media = self.has_visual_media();
+        // Shorter body when media so image + metrics always fit.
+        let max_body = if has_media {
+            if selected { 4 } else { 3 }
+        } else if selected {
+            6
+        } else {
+            4
+        };
         let body_h = body_lines.len().clamp(1, max_body) as u16;
-        let media_h = if self.has_visual_media() {
+        let media_h = if has_media {
             if selected {
                 MEDIA_PREVIEW_ROWS_SELECTED
             } else {
@@ -361,12 +369,14 @@ impl FeedItem {
     }
 }
 
-/// Blank rows between cards.
-pub const POST_GAP: u16 = 1;
-/// Half-block image height (terminal rows) when not selected.
-pub const MEDIA_PREVIEW_ROWS: u16 = 5;
-/// Half-block image height when selected.
-pub const MEDIA_PREVIEW_ROWS_SELECTED: u16 = 8;
+/// Blank rows between cards (air between posts).
+pub const POST_GAP: u16 = 3;
+/// Media slot height (terminal rows) when not selected — compact card or Kitty.
+pub const MEDIA_PREVIEW_ROWS: u16 = 4;
+/// Media slot height when selected.
+pub const MEDIA_PREVIEW_ROWS_SELECTED: u16 = 6;
+/// Max posts shown in the dock slate.
+pub const SLATE_LIMIT: usize = 5;
 
 fn is_plausible_x_status_id(id: &str) -> bool {
     let id = id.trim();

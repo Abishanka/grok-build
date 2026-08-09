@@ -4984,18 +4984,20 @@ impl AppView {
                                 },
                             );
                             // Paint Feeder dock after agent so it sits on the right.
+                            let mut feeder_escapes: Option<String> = None;
                             if let Some(farea) = feeder_area {
                                 if let Some(feeder) = self.feeder.as_mut() {
                                     feeder.dock_focused = self.feeder_focused;
-                                    let _ = crate::views::feeder::render_feeder(
-                                        f.buffer_mut(),
-                                        farea,
-                                        feeder,
-                                    );
+                                    let (_cursor, feeder_esc) =
+                                        crate::views::feeder::render_feeder(
+                                            f.buffer_mut(),
+                                            farea,
+                                            feeder,
+                                        );
+                                    feeder_escapes = feeder_esc;
                                 }
                             } else if self.feeder_dock_open {
-                                // Terminal too narrow — still show a one-line hint
-                                // on the agent footer path is enough; keep rect None.
+                                // Terminal too narrow — keep rect None.
                             }
                             if let Some(modal) = self.import_claude_modal.as_mut() {
                                 let theme = crate::theme::Theme::current();
@@ -5022,6 +5024,16 @@ impl AppView {
                                 panel.render(full_area, f.buffer_mut());
                             }
                             let (cursor_pos, post_flush) = result;
+                            let post_flush = match (post_flush, feeder_escapes) {
+                                (Some(mut a), Some(b)) => {
+                                    a.append_plain(&b);
+                                    Some(a)
+                                }
+                                (None, Some(b)) => {
+                                    Some(crate::terminal::overlay::PostFlush::plain(b))
+                                }
+                                (a, None) => a,
+                            };
                             let has_cloud = false;
                             if has_cloud
                                 || self.import_claude_modal.is_some()
@@ -5156,7 +5168,7 @@ impl AppView {
                     }
                     ActiveView::Feeder => {
                         if let Some(feeder) = self.feeder.as_mut() {
-                            let cursor = crate::views::feeder::render_feeder(
+                            let (cursor, feeder_esc) = crate::views::feeder::render_feeder(
                                 f.buffer_mut(),
                                 view_area,
                                 feeder,
@@ -5167,7 +5179,9 @@ impl AppView {
                             if let Some(panel) = &scroll_debug_panel {
                                 panel.render(full_area, f.buffer_mut());
                             }
-                            return (cursor, Self::merge_escapes(notif_escapes, None));
+                            let feeder_pf = feeder_esc
+                                .map(crate::terminal::overlay::PostFlush::plain);
+                            return (cursor, Self::merge_escapes(notif_escapes, feeder_pf));
                         }
                     }
                 }

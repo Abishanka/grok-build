@@ -12,7 +12,8 @@ use crate::app::app_view::InputOutcome;
 use super::feed_client::{
     discuss_prompt, explain_prompt, untrusted_context_block, FeedClient,
 };
-use super::row::{filter_timeline, load_mock_items, FeedItem};
+use super::row::{filter_timeline, load_mock_items, FeedItem, SLATE_LIMIT};
+use super::work_context::WorkContext;
 
 /// How often the dock re-queries the live API while open.
 const AUTO_REFRESH: Duration = Duration::from_secs(25);
@@ -22,7 +23,7 @@ type RefreshMsg = Result<(Vec<FeedItem>, String), String>;
 /// In-memory state for the Feeder dock.
 #[derive(Debug)]
 pub struct FeederState {
-    /// Ranked feed cards.
+    /// Ranked feed cards (at most [`SLATE_LIMIT`]).
     pub items: Vec<FeedItem>,
     /// Selected row index into `items` (0 when empty).
     pub selected: usize,
@@ -40,12 +41,16 @@ pub struct FeederState {
     pub compose_title: Option<String>,
     /// Dock has keyboard focus (set by AppView each frame / on toggle).
     pub dock_focused: bool,
+    /// Rolling user-work index (prompts) for personalized search.
+    pub work: WorkContext,
     /// In-flight background feed fetch (never blocks the TUI thread).
     pending: Option<Receiver<RefreshMsg>>,
     /// Last successful (or failed) refresh attempt — drives auto-refresh.
     last_refresh_at: Option<Instant>,
     /// True while a background fetch is outstanding.
     pub loading: bool,
+    /// Force next refresh even if one just finished (after new user prompt).
+    force_refresh: bool,
 }
 
 impl Default for FeederState {
@@ -58,7 +63,10 @@ impl FeederState {
     /// Fresh state: show fixtures immediately, kick off live fetch in background.
     pub fn new() -> Self {
         let mut s = Self {
-            items: load_mock_items(),
+            items: load_mock_items()
+                .into_iter()
+                .take(SLATE_LIMIT)
+                .collect(),
             selected: 0,
             scroll: 0,
             peek_scroll: 0,
@@ -67,37 +75,55 @@ impl FeederState {
             live: false,
             compose_title: None,
             dock_focused: true,
+            work: WorkContext::new(),
             pending: None,
             last_refresh_at: None,
             loading: false,
+            force_refresh: false,
         };
         s.start_refresh(None);
         s
     }
 
-    /// Kick a non-blocking live reload. Safe to call while one is in flight (no-op).
+    /// Record a user prompt into the work index and schedule a refresh.
+    pub fn note_user_prompt(&mut self, text: &str) {
+        self.work.push(text);
+        self.force_refresh = true;
+        // Allow overlapping: drop stale pending so new context wins soon
+        if self.pending.is_none() {
+            self.start_refresh(None);
+        }
+    }
+
+    /// Seed work index from agent prompt history (newest first).
+    pub fn seed_work_history(&mut self, history: &[String]) {
+        self.work.seed_from_history(history);
+    }
+
+    /// Kick a non-blocking live reload from current work context.
     pub fn start_refresh(&mut self, hint: Option<&str>) {
+        if self.pending.is_some() && !self.force_refresh {
+            return;
+        }
+        // If forcing while in-flight, still skip starting a second thread —
+        // poll will start one when the current finishes if force_refresh set.
         if self.pending.is_some() {
             return;
         }
+        self.force_refresh = false;
+        if let Some(h) = hint {
+            self.work.push(h);
+        }
         let client = FeedClient::from_env();
         let base = client.base_url.clone();
-        let prompts: Vec<String> = hint
-            .map(|h| vec![h.to_string()])
-            .unwrap_or_else(|| {
-                vec![
-                    "fix oauth refresh token expiry".into(),
-                    "coding agent feed ranking".into(),
-                    "rust async debugging".into(),
-                ]
-            });
+        let prompts = self.work.prompts_for_query();
         let cwd = std::env::current_dir()
             .ok()
             .map(|p| p.display().to_string());
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
         self.loading = true;
-        if self.toast.is_none() {
+        if self.toast.is_none() || self.toast.as_deref().is_some_and(|t| t.contains("offline")) {
             self.toast = Some(format!("Refreshing · {base}"));
         }
         std::thread::Builder::new()
@@ -105,15 +131,17 @@ impl FeederState {
             .spawn(move || {
                 let result = match client.query_feed(
                     &prompts,
-                    Some("repo:demo"),
-                    Some("TokenExpired"),
+                    cwd.as_deref().map(|c| format!("cwd:{c}")).as_deref(),
+                    None,
                     None,
                     cwd.as_deref(),
-                    20,
+                    SLATE_LIMIT,
                 ) {
                     Ok(items) if !items.is_empty() => {
+                        let mut items = filter_timeline(items);
+                        items.truncate(SLATE_LIMIT);
                         let n = items.len();
-                        Ok((filter_timeline(items), format!("live · {n} · {base}")))
+                        Ok((items, format!("live · {n} · {base}")))
                     }
                     Ok(_) => Err(format!("empty response from {base}")),
                     Err(err) => Err(format!("{err}")),
@@ -123,7 +151,6 @@ impl FeederState {
             .ok();
     }
 
-    /// Blocking-style API kept for callers that expect a sync refresh name.
     /// Prefer [`Self::start_refresh`] — this only enqueues background work.
     pub fn refresh_from_service(&mut self, hint: Option<&str>) {
         self.start_refresh(hint);
@@ -151,16 +178,25 @@ impl FeederState {
                     self.loading = false;
                     self.last_refresh_at = Some(Instant::now());
                     changed = true;
+                    if self.force_refresh {
+                        self.start_refresh(None);
+                    }
                 }
                 Ok(Err(err)) => {
                     if self.items.is_empty() {
-                        self.items = load_mock_items();
+                        self.items = load_mock_items()
+                            .into_iter()
+                            .take(SLATE_LIMIT)
+                            .collect();
                     }
                     self.live = false;
                     self.toast = Some(format!("Feeder · offline ({err})"));
                     self.loading = false;
                     self.last_refresh_at = Some(Instant::now());
                     changed = true;
+                    if self.force_refresh {
+                        self.start_refresh(None);
+                    }
                 }
                 Err(TryRecvError::Empty) => {
                     // Still in flight — put receiver back.
@@ -183,7 +219,7 @@ impl FeederState {
                     changed = true;
                 }
             }
-        } else if self.dock_open_wants_auto_refresh() {
+        } else if self.force_refresh || self.dock_open_wants_auto_refresh() {
             self.start_refresh(None);
             changed = true;
         }
