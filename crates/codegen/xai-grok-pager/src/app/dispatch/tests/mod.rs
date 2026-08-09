@@ -285,6 +285,7 @@ fn test_app() -> AppView {
         feeder: None,
         feeder_dock_open: false,
         feeder_focused: false,
+        feeder_dock_rect: None,
         feeder_return: None,
         keyboard_normalizer: crate::input::KeyboardNormalizer::from_terminal_context(),
         has_claude_import: false,

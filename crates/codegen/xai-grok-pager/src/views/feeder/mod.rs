@@ -43,15 +43,16 @@ pub fn feeder_enabled() -> bool {
 
 /// Preferred dock width (phone column). Returns 0 if the terminal is too narrow.
 pub fn dock_width(total_width: u16) -> u16 {
-    // Need room for a usable agent (~56) + dock + gap.
-    const MIN_TOTAL: u16 = 96;
-    const DOCK: u16 = 40;
-    const MIN_AGENT: u16 = 52;
+    // Need room for a usable agent + dock + gap. Prefer a wider dock so
+    // "From X · Matched: …" is not clipped.
+    const MIN_TOTAL: u16 = 84;
+    const DOCK: u16 = 44;
+    const MIN_AGENT: u16 = 40;
     if total_width < MIN_TOTAL {
         return 0;
     }
     let max_dock = total_width.saturating_sub(MIN_AGENT + 1);
-    DOCK.min(max_dock).max(32).min(max_dock)
+    DOCK.min(max_dock).max(36).min(max_dock)
 }
 
 /// Split `area` into `(agent_area, feeder_dock)` when dock is open.

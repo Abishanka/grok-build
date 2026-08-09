@@ -5,10 +5,11 @@
 
 use super::row::FeedItem;
 
-/// Base URL for the feeder-service (default local hackathon port).
-pub const DEFAULT_FEEDER_URL: &str = "http://127.0.0.1:8787";
+/// Base URL for the feeder-service (Railway production by default).
+/// Override with `FEEDER_BASE_URL` / `FEEDER_URL` (see `scripts/start-feeder.sh`).
+pub const DEFAULT_FEEDER_URL: &str = "https://feeder-api-production.up.railway.app";
 
-const TIMEOUT_SECS: u64 = 12;
+const TIMEOUT_SECS: u64 = 8;
 
 /// Sync client used from the TUI input / open path.
 #[derive(Debug, Clone)]

@@ -252,14 +252,24 @@ impl FeedItem {
             .to_ascii_uppercase()
     }
 
-    pub fn reason_line(&self) -> String {
-        if !self.feed.reason_chips.is_empty() {
-            return self.feed.reason_chips.join(" · ");
-        }
+    /// All reason chips from top-level or nested `feed` (API may send either).
+    pub fn all_reason_chips(&self) -> Vec<String> {
         if !self.reason_chips.is_empty() {
-            return self.reason_chips.join(" · ");
+            return self.reason_chips.clone();
         }
-        String::new()
+        if !self.feed.reason_chips.is_empty() {
+            return self.feed.reason_chips.clone();
+        }
+        Vec::new()
+    }
+
+    pub fn reason_line(&self) -> String {
+        let chips = self.all_reason_chips();
+        if chips.is_empty() {
+            String::new()
+        } else {
+            chips.join(" · ")
+        }
     }
 
     pub fn open_url(&self) -> Option<String> {
@@ -298,13 +308,14 @@ impl FeedItem {
 
     /// How many terminal rows this post needs at `width`.
     pub fn height_rows(&self, width: u16, selected: bool) -> u16 {
-        let w = width.saturating_sub(4).max(8) as usize;
+        let w = width.saturating_sub(2).max(8) as usize;
         let body_lines = wrap_text(self.post_text(), w);
-        let max_body = if selected { 8 } else { 5 };
+        // Keep cards shorter so "From X" + metrics stay on-screen.
+        let max_body = if selected { 5 } else { 3 };
         let body_h = body_lines.len().clamp(1, max_body) as u16;
         let media_h = u16::from(self.media.0.iter().any(|m| m.hint().is_some()));
-        // author + body + metrics + reason + gap
-        1 + body_h + 1 + u16::from(!self.reason_line().is_empty()) + media_h + 1
+        // author + source badge ("From X") + body + media? + metrics
+        1 + 1 + body_h + media_h + 1
     }
 }
 

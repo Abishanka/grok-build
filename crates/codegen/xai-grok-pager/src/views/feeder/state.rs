@@ -1,5 +1,8 @@
 //! Feeder view state — selection, scroll, toast, live or mock items.
 
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant};
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use crate::actions::ActionRegistry;
@@ -11,7 +14,12 @@ use super::feed_client::{
 };
 use super::row::{filter_timeline, load_mock_items, FeedItem};
 
-/// In-memory state for the Feeder full-screen view.
+/// How often the dock re-queries the live API while open.
+const AUTO_REFRESH: Duration = Duration::from_secs(25);
+
+type RefreshMsg = Result<(Vec<FeedItem>, String), String>;
+
+/// In-memory state for the Feeder dock.
 #[derive(Debug)]
 pub struct FeederState {
     /// Ranked feed cards.
@@ -32,6 +40,12 @@ pub struct FeederState {
     pub compose_title: Option<String>,
     /// Dock has keyboard focus (set by AppView each frame / on toggle).
     pub dock_focused: bool,
+    /// In-flight background feed fetch (never blocks the TUI thread).
+    pending: Option<Receiver<RefreshMsg>>,
+    /// Last successful (or failed) refresh attempt — drives auto-refresh.
+    last_refresh_at: Option<Instant>,
+    /// True while a background fetch is outstanding.
+    pub loading: bool,
 }
 
 impl Default for FeederState {
@@ -41,68 +55,148 @@ impl Default for FeederState {
 }
 
 impl FeederState {
-    /// Fresh state: try live API, fall back to embedded fixtures.
+    /// Fresh state: show fixtures immediately, kick off live fetch in background.
     pub fn new() -> Self {
         let mut s = Self {
-            items: Vec::new(),
+            items: load_mock_items(),
             selected: 0,
             scroll: 0,
             peek_scroll: 0,
-            toast: None,
+            toast: Some("Feeder · connecting…".into()),
             spinner_tick: 0,
             live: false,
             compose_title: None,
-            dock_focused: false,
+            dock_focused: true,
+            pending: None,
+            last_refresh_at: None,
+            loading: false,
         };
-        s.refresh_from_service(None);
+        s.start_refresh(None);
         s
     }
 
-    /// Reload from feeder-service. `hint` is optional recent prompt for ranking context.
-    pub fn refresh_from_service(&mut self, hint: Option<&str>) {
+    /// Kick a non-blocking live reload. Safe to call while one is in flight (no-op).
+    pub fn start_refresh(&mut self, hint: Option<&str>) {
+        if self.pending.is_some() {
+            return;
+        }
         let client = FeedClient::from_env();
+        let base = client.base_url.clone();
         let prompts: Vec<String> = hint
             .map(|h| vec![h.to_string()])
             .unwrap_or_else(|| {
                 vec![
                     "fix oauth refresh token expiry".into(),
                     "coding agent feed ranking".into(),
+                    "rust async debugging".into(),
                 ]
             });
-        match client.query_feed(
-            &prompts,
-            Some("repo:demo"),
-            Some("TokenExpired"),
-            None,
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.display().to_string())
-                .as_deref(),
-            15,
-        ) {
-            Ok(items) if !items.is_empty() => {
-                self.items = filter_timeline(items);
-                self.live = true;
-                self.selected = 0;
-                self.scroll = 0;
-                self.peek_scroll = 0;
-                self.toast = Some(format!(
-                    "Feeder · {} cards · {}",
-                    self.items.len(),
-                    client.base_url
-                ));
-            }
-            Ok(_) => {
-                self.items = load_mock_items();
-                self.live = false;
-                self.toast = Some("Feeder · empty live response — showing fixtures".into());
-            }
-            Err(err) => {
-                self.items = load_mock_items();
-                self.live = false;
-                self.toast = Some(format!("Feeder · offline ({err}) — fixtures"));
-            }
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string());
+        let (tx, rx) = mpsc::channel();
+        self.pending = Some(rx);
+        self.loading = true;
+        if self.toast.is_none() {
+            self.toast = Some(format!("Refreshing · {base}"));
         }
+        std::thread::Builder::new()
+            .name("feeder-refresh".into())
+            .spawn(move || {
+                let result = match client.query_feed(
+                    &prompts,
+                    Some("repo:demo"),
+                    Some("TokenExpired"),
+                    None,
+                    cwd.as_deref(),
+                    20,
+                ) {
+                    Ok(items) if !items.is_empty() => {
+                        let n = items.len();
+                        Ok((filter_timeline(items), format!("live · {n} · {base}")))
+                    }
+                    Ok(_) => Err(format!("empty response from {base}")),
+                    Err(err) => Err(format!("{err}")),
+                };
+                let _ = tx.send(result);
+            })
+            .ok();
+    }
+
+    /// Blocking-style API kept for callers that expect a sync refresh name.
+    /// Prefer [`Self::start_refresh`] — this only enqueues background work.
+    pub fn refresh_from_service(&mut self, hint: Option<&str>) {
+        self.start_refresh(hint);
+    }
+
+    /// Poll background fetch + schedule auto-refresh. Returns true if UI should redraw.
+    pub fn poll(&mut self) -> bool {
+        let mut changed = false;
+        self.spinner_tick = self.spinner_tick.wrapping_add(1);
+
+        if let Some(rx) = self.pending.take() {
+            match rx.try_recv() {
+                Ok(Ok((items, label))) => {
+                    self.items = items;
+                    self.live = true;
+                    self.selected = self.selected.min(self.items.len().saturating_sub(1));
+                    self.scroll = 0;
+                    self.peek_scroll = 0;
+                    self.toast = Some(format!("Feeder · {label}"));
+                    self.loading = false;
+                    self.last_refresh_at = Some(Instant::now());
+                    changed = true;
+                }
+                Ok(Err(err)) => {
+                    if self.items.is_empty() {
+                        self.items = load_mock_items();
+                    }
+                    self.live = false;
+                    self.toast = Some(format!("Feeder · offline ({err})"));
+                    self.loading = false;
+                    self.last_refresh_at = Some(Instant::now());
+                    changed = true;
+                }
+                Err(TryRecvError::Empty) => {
+                    // Still in flight — put receiver back.
+                    self.pending = Some(rx);
+                    // Pulse toast so the dock feels alive while loading.
+                    if self.spinner_tick % 8 == 0 {
+                        let dots = match (self.spinner_tick / 8) % 3 {
+                            0 => ".",
+                            1 => "..",
+                            _ => "...",
+                        };
+                        self.toast = Some(format!("Feeder · loading{dots}"));
+                        changed = true;
+                    }
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.loading = false;
+                    self.last_refresh_at = Some(Instant::now());
+                    self.toast = Some("Feeder · refresh failed".into());
+                    changed = true;
+                }
+            }
+        } else if self.dock_open_wants_auto_refresh() {
+            self.start_refresh(None);
+            changed = true;
+        }
+
+        changed
+    }
+
+    fn dock_open_wants_auto_refresh(&self) -> bool {
+        // Caller only polls while dock is open; we just gate on interval.
+        match self.last_refresh_at {
+            None => !self.loading,
+            Some(t) => t.elapsed() >= AUTO_REFRESH && !self.loading,
+        }
+    }
+
+    /// Whether the event loop should keep ticking for this dock.
+    pub fn needs_tick(&self) -> bool {
+        self.loading || self.pending.is_some() || self.last_refresh_at.is_none()
     }
 
     /// Currently selected item, if any.
@@ -140,7 +234,7 @@ impl FeederState {
         }
     }
 
-    /// Route input while the feeder view is active.
+    /// Route input while the feeder dock has focus.
     pub fn handle_input(&mut self, ev: &Event, _registry: &ActionRegistry) -> InputOutcome {
         match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key),
@@ -153,6 +247,10 @@ impl FeederState {
                     self.move_selection(1, 12);
                     InputOutcome::Changed
                 }
+                MouseEventKind::Down(_) => {
+                    // Click focuses; selection change is handled by AppView hit-test.
+                    InputOutcome::Changed
+                }
                 _ => InputOutcome::Unchanged,
             },
             Event::Resize(_, _) => InputOutcome::Changed,
@@ -161,22 +259,24 @@ impl FeederState {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> InputOutcome {
-        // Esc: unfocus dock first (AppView may close on second Esc); q closes dock
-        if matches!(key.code, KeyCode::Esc) {
+        // q closes dock. Esc is handled by AppView (unfocus first).
+        if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+            && key.modifiers == KeyModifiers::NONE
+        {
             return InputOutcome::Action(Action::CloseFeeder);
         }
-        if matches!(key.code, KeyCode::Char('q')) && key.modifiers == KeyModifiers::NONE {
-            return InputOutcome::Action(Action::CloseFeeder);
-        }
-        // Tab handled at AppView level when dock is open
 
-        // Navigation
+        // Accept keys with no mods, or only SHIFT (some terminals tag letters).
+        let nav_ok = key.modifiers == KeyModifiers::NONE
+            || key.modifiers == KeyModifiers::SHIFT;
+
+        // Navigation — also accept arrows always
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') if key.modifiers == KeyModifiers::NONE => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') if nav_ok => {
                 self.move_selection(-1, 12);
                 return InputOutcome::Changed;
             }
-            KeyCode::Down | KeyCode::Char('j') if key.modifiers == KeyModifiers::NONE => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') if nav_ok => {
                 self.move_selection(1, 12);
                 return InputOutcome::Changed;
             }
@@ -212,17 +312,27 @@ impl FeederState {
                 self.peek_scroll = self.peek_scroll.saturating_add(1);
                 return InputOutcome::Changed;
             }
-            KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
-                self.refresh_from_service(None);
+            KeyCode::Char('r') | KeyCode::Char('R') if nav_ok => {
+                self.toast = Some("Refreshing…".into());
+                // Allow force refresh even if one is pending by dropping stale? keep simple.
+                if self.pending.is_none() {
+                    self.start_refresh(None);
+                }
                 return InputOutcome::Changed;
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
                 return self.handle_action_key('u');
             }
+            // Swallow Esc here so it never falls through; AppView usually catches first.
+            KeyCode::Esc => {
+                self.dock_focused = false;
+                self.toast = Some("Focus: Agent".into());
+                return InputOutcome::Changed;
+            }
             _ => {}
         }
 
-        // Card actions
+        // Card actions — ignore control/alt so we don't steal chorded agent keys if focus glitches
         if key.modifiers == KeyModifiers::NONE
             && let KeyCode::Char(ch) = key.code
         {
@@ -230,6 +340,10 @@ impl FeederState {
             return self.handle_action_key(lower);
         }
 
+        // When focused, consume leftover plain keys so they don't type into the agent.
+        if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT {
+            return InputOutcome::Unchanged;
+        }
         InputOutcome::Unchanged
     }
 
@@ -294,8 +408,6 @@ impl FeederState {
                 self.toast = Some("Dismissed".into());
                 InputOutcome::Changed
             }
-            // Enter = use
-            _ if ch == '\n' => unreachable!(),
             // post
             'p' => {
                 let title = format!("Update from {}", client.user_id);
@@ -329,6 +441,6 @@ impl FeederState {
 
     /// Footer help line.
     pub fn help_line() -> &'static str {
-        "Tab focus · j/k · u use · e explain · x dismiss · o open · r refresh · q close"
+        "j/k · u use · e explain · x dismiss · o open · r refresh · Esc agent · q close"
     }
 }

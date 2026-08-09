@@ -48,7 +48,12 @@ pub(super) fn dispatch_open_feeder(app: &mut AppView) -> Vec<Effect> {
 
     app.feeder_dock_open = true;
     app.feeder_focused = true;
-    app.show_toast("Feeder dock · Tab agent↔feed · u use · e explain · x dismiss · q close");
+    if let Some(f) = app.feeder.as_mut() {
+        f.dock_focused = true;
+        // Soft non-blocking refresh every time the dock opens
+        f.start_refresh(None);
+    }
+    app.show_toast("Feeder focused · j/k move · u use · e explain · x dismiss · Esc agent · q close");
     vec![]
 }
 
