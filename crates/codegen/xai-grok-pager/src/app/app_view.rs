@@ -1202,6 +1202,9 @@ pub struct AppView {
     pub feeder_focused: bool,
     /// Last painted feeder dock rect (for mouse hit-testing).
     pub feeder_dock_rect: Option<ratatui::layout::Rect>,
+    /// One-shot: next draw must emit Kitty clears for all feeder media
+    /// (set on dock close so absolute placements do not linger over the agent).
+    pub feeder_pending_media_clear: bool,
     /// Legacy: previous full-screen feeder return target (unused by dock toggle).
     pub feeder_return: Option<ActiveView>,
     /// Per-platform key event normalizer.
@@ -1631,6 +1634,7 @@ impl AppView {
             feeder_dock_open: false,
             feeder_focused: false,
             feeder_dock_rect: None,
+            feeder_pending_media_clear: false,
             feeder_return: None,
             keyboard_normalizer: KeyboardNormalizer::from_terminal_context(),
             voice_mode_enabled: false,
@@ -4985,6 +4989,14 @@ impl AppView {
                             );
                             // Paint Feeder dock after agent so it sits on the right.
                             let mut feeder_escapes: Option<String> = None;
+                            if self.feeder_pending_media_clear {
+                                self.feeder_pending_media_clear = false;
+                                let clear =
+                                    crate::views::feeder::media_preview::take_clear_all_escapes();
+                                if !clear.is_empty() {
+                                    feeder_escapes = Some(clear);
+                                }
+                            }
                             if let Some(farea) = feeder_area {
                                 if let Some(feeder) = self.feeder.as_mut() {
                                     feeder.dock_focused = self.feeder_focused;
@@ -4994,7 +5006,13 @@ impl AppView {
                                             farea,
                                             feeder,
                                         );
-                                    feeder_escapes = feeder_esc;
+                                    feeder_escapes = match (feeder_escapes, feeder_esc) {
+                                        (Some(mut a), Some(b)) => {
+                                            a.push_str(&b);
+                                            Some(a)
+                                        }
+                                        (a, b) => a.or(b),
+                                    };
                                 }
                             } else if self.feeder_dock_open {
                                 // Terminal too narrow — keep rect None.
@@ -6369,6 +6387,7 @@ pub(crate) mod tests {
             feeder_dock_open: false,
             feeder_focused: false,
             feeder_dock_rect: None,
+            feeder_pending_media_clear: false,
             feeder_return: None,
             keyboard_normalizer: KeyboardNormalizer::from_terminal_context(),
             voice_mode_enabled: false,

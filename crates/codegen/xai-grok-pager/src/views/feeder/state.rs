@@ -11,7 +11,7 @@ use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 
 use super::feed_client::{
-    discuss_prompt, explain_prompt, untrusted_context_block, FeedClient,
+    discuss_prompt, explain_prompt, untrusted_context_block, FeedClient, SessionInfo,
 };
 use super::row::{
     filter_timeline, load_mock_items, FeedItem, DOCK_CAP, FETCH_BATCH, FETCH_INITIAL,
@@ -54,6 +54,8 @@ pub struct FeederState {
     pub work: WorkContext,
     /// Ids dismissed this session — skipped on merge so they don't bounce back.
     dismissed: HashSet<String>,
+    /// Current Feeder session (ensured on first refresh).
+    session: Option<SessionInfo>,
     /// In-flight background feed fetch (never blocks the TUI thread).
     pending: Option<Receiver<RefreshMsg>>,
     /// Last successful (or failed) refresh attempt — drives auto-refresh.
@@ -88,6 +90,7 @@ impl FeederState {
             dock_focused: true,
             work: WorkContext::new(),
             dismissed: HashSet::new(),
+            session: None,
             pending: None,
             last_refresh_at: None,
             loading: false,
@@ -107,6 +110,14 @@ impl FeederState {
     pub fn note_user_prompt(&mut self, text: &str) {
         self.work.push(text);
         self.force_refresh = true;
+        // Post moment in background (queued with prompts).
+        if let Some(sid) = self.session.as_ref().map(|s| s.session_id.clone()) {
+            let prompts = self.work.prompts_for_query();
+            let client = FeedClient::from_env();
+            std::thread::spawn(move || {
+                let _ = client.post_moment(&sid, &prompts);
+            });
+        }
         if self.pending.is_none() {
             self.start_refresh(None);
         }
@@ -135,6 +146,20 @@ impl FeederState {
         let cwd = std::env::current_dir()
             .ok()
             .map(|p| p.display().to_string());
+        let workspace_key = super::work_context::workspace_key_from_cwd();
+        // Ensure session once (idempotent on server).
+        let session_id = if self.session.is_none() {
+            if let Ok(sess) = client.ensure_session(&workspace_key) {
+                let sid = sess.session_id.clone();
+                self.session = Some(sess);
+                self.set_toast("session ok".to_string(), TOAST_TTL_STATUS);
+                Some(sid)
+            } else {
+                None
+            }
+        } else {
+            self.session.as_ref().map(|s| s.session_id.clone())
+        };
         // Cold start: fill dock; later refreshes pull a small batch to merge.
         let fetch_n = if self.cold_start || self.items.is_empty() {
             FETCH_INITIAL
@@ -152,16 +177,18 @@ impl FeederState {
         {
             self.set_toast(format!("Refreshing · {base}"), TOAST_TTL_STATUS);
         }
+        let session_id_for_thread = session_id.clone();
         std::thread::Builder::new()
             .name("feeder-refresh".into())
             .spawn(move || {
                 let result = match client.query_feed(
                     &prompts,
-                    cwd.as_deref().map(|c| format!("cwd:{c}")).as_deref(),
+                    Some(&workspace_key),
                     None,
                     None,
                     cwd.as_deref(),
                     fetch_n,
+                    session_id_for_thread.as_deref(),
                 ) {
                     Ok(items) if !items.is_empty() => {
                         let mut items = filter_timeline(items);
@@ -257,6 +284,14 @@ impl FeederState {
                     self.last_refresh_at = Some(Instant::now());
                     let _ = added;
                     changed = true;
+                    // Post moment in background after successful refresh.
+                    if let Some(sid) = self.session.as_ref().map(|s| s.session_id.clone()) {
+                        let prompts = self.work.prompts_for_query();
+                        let client = FeedClient::from_env();
+                        std::thread::spawn(move || {
+                            let _ = client.post_moment(&sid, &prompts);
+                        });
+                    }
                     if self.force_refresh {
                         self.start_refresh(None);
                     }
@@ -298,6 +333,15 @@ impl FeederState {
         } else if self.force_refresh || self.dock_open_wants_auto_refresh() {
             self.start_refresh(None);
             changed = true;
+        }
+
+        // Heartbeat if we have a session (background, fire-and-forget; clone to 'static).
+        if let Some(sess) = &self.session {
+            let sid = sess.session_id.clone();
+            let client = FeedClient::from_env();
+            let _ = std::thread::spawn(move || {
+                let _ = client.heartbeat(&sid);
+            });
         }
 
         changed
@@ -507,7 +551,7 @@ impl FeederState {
                 InputOutcome::Changed
             }
             'x' => {
-                let _ = client.post_feedback(&item.id, "dismiss");
+                let _ = client.post_feedback(&item.id, "dismiss");  // server mutes
                 self.dismissed.insert(item.id.clone());
                 if let Some(idx) = self.items.iter().position(|i| i.id == item.id) {
                     self.items.remove(idx);
@@ -515,7 +559,7 @@ impl FeederState {
                         self.selected = self.items.len().saturating_sub(1);
                     }
                 }
-                self.set_toast("Dismissed", TOAST_TTL);
+                self.set_toast("Dismissed (muted)", TOAST_TTL);
                 InputOutcome::Changed
             }
             'p' => {

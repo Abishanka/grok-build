@@ -1,10 +1,16 @@
-//! Media download + optional Kitty/iTerm placement for Feeder cards.
+//! Media download + Kitty inline placement for Feeder cards.
 //!
-//! Primary path: download bytes for Kitty/iTerm inline graphics.
-//! Fallback: caller paints a clean text media card (no muddy half-blocks).
-//! Half-blocks only if `FEEDER_HALFBLOCK=1`.
+//! Kitty graphics are absolute screen placements and survive cell redraws.
+//! Feeder therefore tracks every id placed last frame and:
+//! - on **scroll change**: full-refresh — delete *all* previous feeder ids, then re-place
+//! - otherwise: delete only ids that left the visible set
+//!
+//! Fallback (no safe Kitty overlay, or image not ready): half-block cells in the
+//! ratatui buffer (always scroll-correct). Text card only while loading / failed.
+//!
+//! `FEEDER_HALFBLOCK=0` disables half-blocks. Default is on when Kitty path is off.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -14,8 +20,9 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 
 use crate::terminal::image::{
-    detect_graphics_protocol, fit_image_to_cells, place_inline_image, prepare_overlay_image_bytes,
-    transmit_inline_image, GraphicsProtocol,
+    clear_kitty_image, detect_graphics_protocol, fit_image_to_cells, place_inline_image,
+    prepare_overlay_image_bytes, scrollback_inline_overlay_active, transmit_inline_image,
+    GraphicsProtocol,
 };
 
 /// Downloaded + prepared image ready for terminal graphics.
@@ -29,7 +36,7 @@ pub struct MediaBytes {
     pub transmitted: bool,
 }
 
-/// Optional half-block rows (env-gated only).
+/// Half-block row (buffer-local inline fallback).
 #[derive(Debug, Clone)]
 pub struct PreviewRow {
     pub cells: Vec<(Color, Color)>,
@@ -48,6 +55,11 @@ pub struct MediaCache {
     rx: Option<Receiver<(String, Option<MediaBytes>)>>,
     tx: Option<mpsc::Sender<(String, Option<MediaBytes>)>>,
     next_id: u32,
+    /// Kitty image ids placed on the previous feeder frame.
+    last_placed_ids: HashSet<u32>,
+    /// `(scroll, selected)` from the previous feeder frame.
+    /// Full refresh when either changes (selection changes card heights → media Y).
+    last_layout_key: Option<(usize, usize)>,
 }
 
 impl MediaCache {
@@ -60,6 +72,8 @@ impl MediaCache {
             rx: Some(rx),
             tx: Some(tx),
             next_id: 9000,
+            last_placed_ids: HashSet::new(),
+            last_layout_key: None,
         }
     }
 
@@ -88,8 +102,10 @@ impl MediaCache {
                         self.next_id = self.next_id.wrapping_add(1).max(9001);
                         bytes.image_id = self.next_id;
                     }
-                    // Optional halfblock decode for FEEDER_HALFBLOCK=1
-                    if halfblock_enabled() {
+                    // Always decode halfblocks when Kitty overlay is unsafe, or
+                    // when halfblock is not explicitly disabled — keeps buffer-
+                    // local fallback ready without a second download.
+                    if should_decode_halfblock() {
                         if let Some(hb) = decode_halfblocks(&bytes.prepared, 40, 4) {
                             self.halfblocks.insert(url.clone(), hb);
                         }
@@ -136,15 +152,22 @@ impl MediaCache {
         !self.inflight.is_empty()
     }
 
-    /// Build Kitty/iTerm place escapes for a media rect. Marks transmitted.
-    pub fn placement_escapes(&mut self, url: &str, area: Rect) -> Option<String> {
-        if detect_graphics_protocol() == GraphicsProtocol::None {
+    /// Whether Kitty scrollback-style placement is safe for Feeder.
+    pub fn kitty_inline_ok() -> bool {
+        scrollback_inline_overlay_active()
+    }
+
+    /// Build Kitty place escapes for a media rect. Marks transmitted.
+    /// Returns `(escapes, image_id)` so the caller can track this-frame ids.
+    pub fn placement_escapes(&mut self, url: &str, area: Rect) -> Option<(String, u32)> {
+        if !Self::kitty_inline_ok() {
             return None;
         }
         let entry = self.ready.get_mut(url)?;
         if area.width < 4 || area.height < 2 {
             return None;
         }
+        let image_id = entry.image_id;
         let needs_tx = !entry.transmitted;
         let mut esc = String::new();
         if needs_tx {
@@ -155,6 +178,8 @@ impl MediaCache {
                 return None;
             }
         }
+        // Re-borrow after possible mutation
+        let entry = self.ready.get(url)?;
         let place = place_inline_image(
             &entry.prepared,
             entry.width,
@@ -166,8 +191,98 @@ impl MediaCache {
             true, // iTerm may need data each place for feeder
         )?;
         esc.push_str(&place);
-        Some(esc)
+        Some((esc, image_id))
     }
+
+    /// Call **before** placing this frame.
+    ///
+    /// On scroll/selection change: full-refresh — delete every feeder id from last
+    /// frame and reset `transmitted` so subsequent places re-upload.
+    ///
+    /// When layout is unchanged, returns empty (stale ids cleared in [`end_frame`]).
+    pub fn begin_frame(&mut self, scroll: usize, selected: usize) -> String {
+        let key = (scroll, selected);
+        let layout_changed = self.last_layout_key.map(|k| k != key).unwrap_or(false);
+        if !layout_changed {
+            return String::new();
+        }
+        // FULL refresh on scroll/selection: wipe every feeder placement so nothing
+        // is left floating over the agent pane at the old Y.
+        let to_clear: HashSet<u32> = self.last_placed_ids.iter().copied().collect();
+        let clears = self.emit_clears(&to_clear);
+        self.last_placed_ids.clear();
+        // Keep last_layout_key until end_frame commits the new key.
+        clears
+    }
+
+    /// Call **after** placing this frame.
+    ///
+    /// Clears ids that were on screen last frame but not this frame (scrolled off).
+    /// Commits `this_frame` + layout key.
+    pub fn end_frame(
+        &mut self,
+        this_frame: HashSet<u32>,
+        scroll: usize,
+        selected: usize,
+    ) -> String {
+        let mut to_clear: HashSet<u32> = HashSet::new();
+        for &id in &self.last_placed_ids {
+            if !this_frame.contains(&id) {
+                to_clear.insert(id);
+            }
+        }
+        let clears = self.emit_clears(&to_clear);
+        self.last_placed_ids = this_frame;
+        self.last_layout_key = Some((scroll, selected));
+        clears
+    }
+
+    /// Delete every feeder placement (dock close / hide). Resets frame tracking.
+    pub fn clear_all_placed(&mut self) -> String {
+        let mut to_clear: HashSet<u32> = self.last_placed_ids.iter().copied().collect();
+        // Belt and suspenders: any transmitted ready entry may still be on GPU.
+        for entry in self.ready.values() {
+            if entry.transmitted {
+                to_clear.insert(entry.image_id);
+            }
+        }
+        let clears = self.emit_clears(&to_clear);
+        self.last_placed_ids.clear();
+        self.last_layout_key = None;
+        clears
+    }
+
+    fn emit_clears(&mut self, ids: &HashSet<u32>) -> String {
+        if ids.is_empty() {
+            return String::new();
+        }
+        let mut clears = String::new();
+        for &id in ids {
+            clears.push_str(&clear_kitty_image(id));
+        }
+        // d=i removed GPU data — force retransmit on next place.
+        for entry in self.ready.values_mut() {
+            if ids.contains(&entry.image_id) {
+                entry.transmitted = false;
+            }
+        }
+        clears
+    }
+
+    /// Snapshot of last-placed ids (tests).
+    #[cfg(test)]
+    pub fn last_placed_ids(&self) -> &HashSet<u32> {
+        &self.last_placed_ids
+    }
+}
+
+/// Take clear escapes for all feeder placements (dock close path).
+pub fn take_clear_all_escapes() -> String {
+    let cache = global_cache();
+    let Ok(mut cache) = cache.lock() else {
+        return String::new();
+    };
+    cache.clear_all_placed()
 }
 
 pub fn global_cache() -> Arc<Mutex<MediaCache>> {
@@ -181,8 +296,24 @@ pub fn graphics_available() -> bool {
     detect_graphics_protocol() != GraphicsProtocol::None
 }
 
+/// Half-block fallback: on by default; `FEEDER_HALFBLOCK=0` forces off;
+/// `FEEDER_HALFBLOCK=1` forces on even when Kitty is active.
 pub fn halfblock_enabled() -> bool {
-    std::env::var_os("FEEDER_HALFBLOCK").is_some_and(|v| v == "1")
+    match std::env::var_os("FEEDER_HALFBLOCK") {
+        Some(v) if v == "0" => false,
+        Some(v) if v == "1" => true,
+        // Default: use halfblocks when Kitty inline is not safe.
+        _ => !MediaCache::kitty_inline_ok(),
+    }
+}
+
+fn should_decode_halfblock() -> bool {
+    match std::env::var_os("FEEDER_HALFBLOCK") {
+        Some(v) if v == "0" => false,
+        Some(v) if v == "1" => true,
+        // Decode whenever Kitty might not paint — keeps fallback ready.
+        _ => true,
+    }
 }
 
 fn fetch_media(url: &str) -> Option<MediaBytes> {
@@ -201,12 +332,11 @@ fn fetch_media(url: &str) -> Option<MediaBytes> {
         return None;
     }
     let prepared = prepare_overlay_image_bytes(&bytes)?;
-    let (width, height) = crate::prompt_images::decode_image_dimensions(&prepared)
-        .or_else(|| {
-            image::load_from_memory(&prepared)
-                .ok()
-                .map(|i| (i.width(), i.height()))
-        })?;
+    let (width, height) = crate::prompt_images::decode_image_dimensions(&prepared).or_else(|| {
+        image::load_from_memory(&prepared)
+            .ok()
+            .map(|i| (i.width(), i.height()))
+    })?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     url.hash(&mut hasher);
     let image_id = 9000 + (hasher.finish() as u32 % 50_000);
@@ -254,4 +384,87 @@ fn decode_halfblocks(png_bytes: &[u8], cols: u32, row_pairs: u32) -> Option<Half
         rows.push(PreviewRow { cells });
     }
     Some(HalfblockPreview { rows })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn end_frame_clears_ids_not_in_this_frame() {
+        let mut cache = MediaCache::new();
+        cache.last_placed_ids = [9001, 9002, 9003].into_iter().collect();
+        cache.last_layout_key = Some((0, 0));
+
+        let this: HashSet<u32> = [9001, 9003].into_iter().collect();
+        let _ = cache.begin_frame(0, 0); // no layout change
+        let clears = cache.end_frame(this.clone(), 0, 0);
+
+        assert!(clears.contains(&clear_kitty_image(9002)));
+        assert!(!clears.contains(&clear_kitty_image(9001)));
+        assert!(!clears.contains(&clear_kitty_image(9003)));
+        assert_eq!(cache.last_placed_ids(), &this);
+    }
+
+    #[test]
+    fn begin_frame_full_refresh_on_scroll_clears_all_previous() {
+        let mut cache = MediaCache::new();
+        cache.last_placed_ids = [9001, 9002].into_iter().collect();
+        cache.last_layout_key = Some((0, 0));
+        // Mark transmitted so we can assert reset after clear.
+        cache.ready.insert(
+            "u".into(),
+            MediaBytes {
+                url: "u".into(),
+                prepared: vec![0; 64],
+                width: 10,
+                height: 10,
+                image_id: 9001,
+                transmitted: true,
+            },
+        );
+
+        let clears = cache.begin_frame(3, 0);
+        assert!(clears.contains(&clear_kitty_image(9001)));
+        assert!(clears.contains(&clear_kitty_image(9002)));
+        assert!(cache.last_placed_ids.is_empty());
+        assert!(!cache.ready.get("u").unwrap().transmitted);
+
+        // Place path after scroll would retransmit; end_frame commits new set.
+        let this: HashSet<u32> = [9001, 9002].into_iter().collect();
+        let stale = cache.end_frame(this.clone(), 3, 0);
+        assert!(stale.is_empty(), "nothing stale after full clear");
+        assert_eq!(cache.last_placed_ids(), &this);
+        assert_eq!(cache.last_layout_key, Some((3, 0)));
+    }
+
+    #[test]
+    fn begin_frame_full_refresh_on_selection_change() {
+        let mut cache = MediaCache::new();
+        cache.last_placed_ids = [9001].into_iter().collect();
+        cache.last_layout_key = Some((0, 0));
+        let clears = cache.begin_frame(0, 2);
+        assert!(clears.contains(&clear_kitty_image(9001)));
+    }
+
+    #[test]
+    fn clear_all_placed_empties_tracking() {
+        let mut cache = MediaCache::new();
+        cache.last_placed_ids = [9100].into_iter().collect();
+        cache.last_layout_key = Some((2, 1));
+        let clears = cache.clear_all_placed();
+        assert!(clears.contains(&clear_kitty_image(9100)));
+        assert!(cache.last_placed_ids.is_empty());
+        assert!(cache.last_layout_key.is_none());
+    }
+
+    #[test]
+    fn clears_do_not_emit_overlay_id_one() {
+        let mut cache = MediaCache::new();
+        cache.last_placed_ids = [9005].into_iter().collect();
+        cache.last_layout_key = Some((0, 0));
+        let clears = cache.end_frame(HashSet::new(), 0, 0);
+        assert!(!clears.contains(&clear_kitty_image(1)));
+        assert!(clears.contains(&clear_kitty_image(9005)));
+    }
 }

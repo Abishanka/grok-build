@@ -1,4 +1,10 @@
-//! Feeder dock paint — spaced cards, color accents, clean media.
+//! Feeder dock paint — spaced cards, color accents, inline media.
+//!
+//! Kitty placements are absolute and survive cell redraws. Each frame we
+//! place only visible media, then clear stale feeder ids (full wipe on scroll)
+//! so nothing floats over the agent pane.
+
+use std::collections::HashSet;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -8,7 +14,7 @@ use crate::theme::Theme;
 use crate::views::goal_detail::truncate_to_width;
 
 use super::layout::compute_layout;
-use super::media_preview::{global_cache, halfblock_enabled};
+use super::media_preview::{global_cache, halfblock_enabled, MediaCache};
 use super::row::{
     wrap_text, FeedItem, SourceType, MEDIA_PREVIEW_ROWS, MEDIA_PREVIEW_ROWS_SELECTED, POST_GAP,
 };
@@ -40,15 +46,37 @@ pub fn render_feeder(
     let list = layout.list;
     prefetch_media(state);
     ensure_selection_visible(state, list.height, list.width);
+
+    // Order matters for Kitty:
+    //   1) begin_frame — full clear on scroll/selection (reset transmitted)
+    //   2) place visible media (retransmit after full clear)
+    //   3) end_frame — clear ids that left the viewport
+    // Escapes are concatenated clear→place→stale-clear so post-flush never
+    // leaves ghosts over the agent pane.
     let mut escapes = String::new();
-    // Always clear absolute Kitty graphics first — prior feeder frames left
-    // images floating outside the dock over the agent pane.
-    escapes.push_str(&crate::terminal::overlay::clear_kitty().into_string());
-    if let Some(e) = render_posts(buf, list, state, &theme) {
-        escapes.push_str(&e);
+    {
+        let cache_arc = global_cache();
+        if let Ok(mut cache) = cache_arc.lock() {
+            escapes.push_str(&cache.begin_frame(state.scroll, state.selected));
+        }
     }
+
+    let (place_esc, this_frame_ids) = render_posts(buf, list, state, &theme);
+    escapes.push_str(&place_esc);
+
+    {
+        let cache_arc = global_cache();
+        if let Ok(mut cache) = cache_arc.lock() {
+            escapes.push_str(&cache.end_frame(this_frame_ids, state.scroll, state.selected));
+        }
+    }
+
     render_footer(buf, layout.footer, state, &theme);
-    (None, Some(escapes))
+    if escapes.is_empty() {
+        (None, None)
+    } else {
+        (None, Some(escapes))
+    }
 }
 
 fn fill(buf: &mut Buffer, area: Rect, theme: &Theme) {
@@ -146,9 +174,11 @@ fn render_posts(
     area: Rect,
     state: &FeederState,
     theme: &Theme,
-) -> Option<String> {
+) -> (String, HashSet<u32>) {
+    let mut escapes = String::new();
+    let mut this_frame = HashSet::new();
     if area.height == 0 || area.width == 0 {
-        return None;
+        return (escapes, this_frame);
     }
     if state.items.is_empty() {
         buf.set_string(
@@ -157,10 +187,9 @@ fn render_posts(
             "No posts — refreshing…",
             Style::default().fg(theme.text_secondary).bg(theme.bg_base),
         );
-        return None;
+        return (escapes, this_frame);
     }
 
-    let mut escapes = String::new();
     let mut y = area.y;
     let end_y = area.y.saturating_add(area.height);
     let mut idx = state.scroll;
@@ -178,9 +207,9 @@ fn render_posts(
             width: area.width,
             height: content_h,
         };
-        if let Some(esc) = paint_post(buf, block, item, selected, state.dock_focused, theme) {
-            escapes.push_str(&esc);
-        }
+        let (esc, ids) = paint_post(buf, block, item, selected, state.dock_focused, theme, area);
+        escapes.push_str(&esc);
+        this_frame.extend(ids);
         // Dim separator in the gap
         if POST_GAP >= 2 && y + content_h + 1 < end_y {
             let sep_y = y + content_h + 1;
@@ -195,11 +224,7 @@ fn render_posts(
         y = y.saturating_add(h);
         idx += 1;
     }
-    if escapes.is_empty() {
-        None
-    } else {
-        Some(escapes)
-    }
+    (escapes, this_frame)
 }
 
 struct CardColors {
@@ -246,9 +271,12 @@ fn paint_post(
     selected: bool,
     dock_focused: bool,
     theme: &Theme,
-) -> Option<String> {
+    list_clip: Rect,
+) -> (String, HashSet<u32>) {
+    let mut esc = String::new();
+    let mut ids = HashSet::new();
     if area.height == 0 || area.width == 0 {
-        return None;
+        return (esc, ids);
     }
     let c = card_colors(item, selected, dock_focused, theme);
     let blank = " ".repeat(area.width as usize);
@@ -269,7 +297,7 @@ fn paint_post(
     let text_x = area.x.saturating_add(2);
     let w = area.width.saturating_sub(2) as usize;
     if w == 0 {
-        return None;
+        return (esc, ids);
     }
     let mut row = 0u16;
     let sel_mark = if selected { "›" } else { " " };
@@ -299,7 +327,7 @@ fn paint_post(
     );
     row += 1;
     if row >= area.height {
-        return None;
+        return (esc, ids);
     }
 
     // Badge
@@ -322,7 +350,7 @@ fn paint_post(
         );
         row += 1;
         if row >= area.height {
-            return None;
+            return (esc, ids);
         }
     }
 
@@ -368,7 +396,6 @@ fn paint_post(
     }
 
     // Media slot (before metrics) — never steals metrics row
-    let mut media_esc = None;
     if media_rows > 0 {
         let room_after_metrics = area.height.saturating_sub(row).saturating_sub(1);
         let avail = room_after_metrics.min(media_rows);
@@ -379,7 +406,14 @@ fn paint_post(
                 width: area.width.saturating_sub(2),
                 height: avail,
             };
-            media_esc = paint_media(buf, media_area, item, &c);
+            // Clip to list viewport so placements never sit outside the dock list.
+            if let Some(clipped) = intersect_rect(media_area, list_clip) {
+                if clipped.height >= 2 && clipped.width >= 4 {
+                    let (m_esc, m_ids) = paint_media(buf, clipped, item, &c);
+                    esc.push_str(&m_esc);
+                    ids.extend(m_ids);
+                }
+            }
             row = row.saturating_add(avail);
         }
     }
@@ -401,7 +435,24 @@ fn paint_post(
         );
     }
 
-    media_esc
+    (esc, ids)
+}
+
+/// Intersection of two rects; `None` if empty.
+fn intersect_rect(a: Rect, b: Rect) -> Option<Rect> {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = a.x.saturating_add(a.width).min(b.x.saturating_add(b.width));
+    let y1 = a.y.saturating_add(a.height).min(b.y.saturating_add(b.height));
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(Rect {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    })
 }
 
 fn paint_media(
@@ -409,18 +460,41 @@ fn paint_media(
     area: Rect,
     item: &FeedItem,
     c: &CardColors,
-) -> Option<String> {
+) -> (String, HashSet<u32>) {
+    let mut esc = String::new();
+    let mut ids = HashSet::new();
     if area.width == 0 || area.height == 0 {
-        return None;
+        return (esc, ids);
     }
     let url = item.preview_image_url();
 
-    // IMPORTANT: do NOT use Kitty/iTerm graphics here.
-    // Those are absolute screen placements and float outside the scrollable
-    // Feeder dock (appear "in the background"). Media must live in the
-    // ratatui cell buffer so it scrolls with the panel.
+    // 1) Kitty inline (safe terminals only) — absolute place + tracked ids.
+    if MediaCache::kitty_inline_ok() {
+        if let Some(ref u) = url {
+            let cache_arc = global_cache();
+            if let Ok(mut cache) = cache_arc.lock() {
+                if cache.get(u).is_some() {
+                    // Blank underlay so cell text does not show through the image.
+                    let blank = " ".repeat(area.width as usize);
+                    for r in 0..area.height {
+                        buf.set_string(
+                            area.x,
+                            area.y + r,
+                            &blank,
+                            Style::default().bg(c.bg),
+                        );
+                    }
+                    if let Some((place, id)) = cache.placement_escapes(u, area) {
+                        esc.push_str(&place);
+                        ids.insert(id);
+                        return (esc, ids);
+                    }
+                }
+            }
+        }
+    }
 
-    // Optional half-block only if explicitly enabled (still buffer-local).
+    // 2) Half-block buffer-local preview (scrolls with dock cells).
     if halfblock_enabled() {
         if let Some(ref u) = url {
             let cache_arc = global_cache();
@@ -438,15 +512,15 @@ fn paint_media(
                             }
                         }
                     }
-                    return None;
+                    return (esc, ids);
                 }
             }
         }
     }
 
-    // Default: clean media card painted into the dock buffer (scrolls with dock).
+    // 3) Loading / failed: framed text card in the dock buffer.
     paint_media_card(buf, area, item, c, url.as_deref());
-    None
+    (esc, ids)
 }
 
 fn paint_media_card(

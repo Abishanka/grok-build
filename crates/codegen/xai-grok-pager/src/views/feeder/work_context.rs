@@ -1,6 +1,8 @@
 //! Rolling work index for Feeder — recent user prompts drive search.
 
+use git2;
 use std::fs;
+use std::hash::Hasher;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -178,6 +180,35 @@ impl WorkContext {
 fn default_path() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     Some(cwd.join(".grok").join("feeder-session.md"))
+}
+
+/// Compute workspace_key: prefer git remote url hash or "repo:{basename}", fallback to cwd.
+pub fn workspace_key_from_cwd() -> String {
+    // Try to get git remote (simple hash of first remote url)
+    if let Ok(repo) = git2::Repository::discover(std::env::current_dir().unwrap_or_default()) {
+        if let Ok(remotes) = repo.remotes() {
+            for name in remotes.iter().flatten() {
+                if let Ok(remote) = repo.find_remote(name) {
+                    if let Some(url) = remote.url() {
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        std::hash::Hash::hash(&url, &mut hasher);
+                        let h = hasher.finish();
+                        return format!("git:{:016x}", h);
+                    }
+                }
+            }
+        }
+    }
+    // Fallback repo basename or cwd
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(name) = cwd.file_name().and_then(|n| n.to_str()) {
+            if !name.is_empty() && name != "." {
+                return format!("repo:{}", name);
+            }
+        }
+        return format!("cwd:{}", cwd.display());
+    }
+    "unknown".to_string()
 }
 
 fn clean_prompt(text: &str) -> String {

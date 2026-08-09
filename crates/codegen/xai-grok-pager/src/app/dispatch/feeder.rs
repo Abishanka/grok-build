@@ -83,6 +83,8 @@ fn preferred_agent_view(app: &AppView) -> ActiveView {
 pub(super) fn dispatch_close_feeder(app: &mut AppView) -> Vec<Effect> {
     app.feeder_dock_open = false;
     app.feeder_focused = false;
+    // Absolute Kitty placements survive cell redraw — clear on next paint.
+    app.feeder_pending_media_clear = true;
     if matches!(app.active_view, ActiveView::Feeder) {
         app.active_view = preferred_agent_view(app);
     }

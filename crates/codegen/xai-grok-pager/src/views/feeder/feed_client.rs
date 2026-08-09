@@ -4,6 +4,7 @@
 //! runs inside a Tokio runtime and dropping reqwest's blocking runtime panics.
 
 use super::row::FeedItem;
+use serde::Deserialize;
 
 /// Base URL for the feeder-service (Railway production by default).
 /// Override with `FEEDER_BASE_URL` / `FEEDER_URL` (see `scripts/start-feeder.sh`).
@@ -100,10 +101,12 @@ impl FeedClient {
         diff_summary: Option<&str>,
         cwd: Option<&str>,
         limit: usize,
+        session_id: Option<&str>,
     ) -> Result<Vec<FeedItem>, FeedClientError> {
         let body = serde_json::json!({
             "user_id": self.user_id,
             "workspace_key": workspace_key,
+            "session_id": session_id,
             "limit": limit,
             "context": {
                 "cwd": cwd,
@@ -129,6 +132,36 @@ impl FeedClient {
             "action": action,
         });
         let _ = self.post_json("/v1/feed/feedback", body)?;
+        Ok(())
+    }
+
+    /// POST /v1/sessions to ensure a session exists and return its info.
+    pub fn ensure_session(&self, workspace_key: &str) -> Result<SessionInfo, FeedClientError> {
+        let body = serde_json::json!({
+            "user_id": self.user_id,
+            "device_id": self.user_id,
+            "workspace_key": workspace_key,
+        });
+        let v = self.post_json("/v1/sessions", body)?;
+        serde_json::from_value(v).map_err(|e| FeedClientError::Transport(e.to_string()))
+    }
+
+    /// Heartbeat a session (keeps it alive).
+    pub fn heartbeat(&self, session_id: &str) -> Result<(), FeedClientError> {
+        let body = serde_json::json!({
+            "session_id": session_id,
+        });
+        let _ = self.post_json("/v1/sessions/heartbeat", body)?;
+        Ok(())
+    }
+
+    /// Post recent prompts as a moment (for session personalization).
+    pub fn post_moment(&self, session_id: &str, recent_prompts: &[String]) -> Result<(), FeedClientError> {
+        let body = serde_json::json!({
+            "session_id": session_id,
+            "recent_prompts": recent_prompts,
+        });
+        let _ = self.post_json("/v1/sessions/moment", body)?;
         Ok(())
     }
 
@@ -167,6 +200,15 @@ impl FeedClient {
         .join()
         .unwrap_or(false)
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionInfo {
+    pub session_id: String,
+    #[serde(default)]
+    pub workspace_key: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

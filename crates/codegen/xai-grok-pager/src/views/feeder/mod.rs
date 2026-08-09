@@ -8,7 +8,8 @@
 //! - [`state`] — `FeederState` (selection, scroll, toast, items)
 //! - [`row`] — `FeedItem` model + display helpers
 //! - [`layout`] — pure rect computation (list + peek + footer)
-//! - [`render`] — paint routine
+//! - [`render`] — paint routine (inline media + full Kitty refresh on scroll)
+//! - [`media_preview`] — download cache, Kitty place/clear, half-block fallback
 //! - [`peek`] — peek panel body
 //! - [`feed_client`] — HTTP client to feeder-service (live + fixture fallback)
 //!
