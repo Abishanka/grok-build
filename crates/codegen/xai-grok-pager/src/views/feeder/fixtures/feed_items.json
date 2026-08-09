@@ -84,6 +84,13 @@
       "ai_generated": true,
       "model": "grok-4.5",
       "urls": []
+    },
+    "social": {
+      "source": "cohort",
+      "peer_count": 3,
+      "endorse_weight": 2.1,
+      "synth_origin": "cohort",
+      "origin_handle": "alice"
     }
   },
   {
@@ -133,7 +140,8 @@
       "urls": ["https://x.com/dbtips/status/1829384756102938499"],
       "x_post_id": "1829384756102938499",
       "author_handle": "@dbtips"
-    }
+    },
+    "social": { "source": "cohort", "peer_count": 1, "endorse_weight": 0.8 }
   },
   {
     "id": "44444444-4444-4444-4444-444444444444",
@@ -177,7 +185,8 @@
     "provenance": {
       "ai_generated": true,
       "model": "grok-4.5"
-    }
+    },
+    "social": { "synth_origin": "self" }
   },
   {
     "id": "55555555-5555-5555-5555-555555555555",

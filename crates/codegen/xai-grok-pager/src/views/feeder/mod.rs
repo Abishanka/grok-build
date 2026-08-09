@@ -27,7 +27,8 @@ pub mod work_context;
 
 pub use render::render_feeder;
 pub use row::{
-    filter_timeline, load_mock_items, FeedAuthor, FeedItem, FeedMedia, FeedProvenance, SourceType,
+    filter_timeline, load_mock_items, FeedAuthor, FeedItem, FeedMedia, FeedProvenance, FeedSocial,
+    SocialChips, SourceType,
 };
 pub use state::FeederState;
 

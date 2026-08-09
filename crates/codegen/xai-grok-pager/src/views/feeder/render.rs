@@ -330,7 +330,7 @@ fn paint_post(
         return (esc, ids);
     }
 
-    // Badge
+    // Badge — de-emphasised when the post came from your own session.
     {
         let badge = source_badge(item);
         let matched = match_fragment(item);
@@ -339,15 +339,29 @@ fn paint_post(
         } else {
             format!("{badge} · {matched}")
         };
+        let self_synth = item.is_self_synth();
         buf.set_string(
             text_x,
             area.y + row,
             truncate_to_width(&why, w),
             Style::default()
-                .fg(c.badge)
+                .fg(if self_synth { c.dim } else { c.badge })
                 .bg(c.bg)
-                .add_modifier(Modifier::BOLD),
+                .add_modifier(if self_synth {
+                    Modifier::empty()
+                } else {
+                    Modifier::BOLD
+                }),
         );
+        row += 1;
+        if row >= area.height {
+            return (esc, ids);
+        }
+    }
+
+    // Social chips — peer endorsement + synth origin. Exactly one row, and
+    // only when `height_rows` reserved it (same width math, so they agree).
+    if paint_social_row(buf, text_x, area.y + row, w, item, &c, theme) {
         row += 1;
         if row >= area.height {
             return (esc, ids);
@@ -436,6 +450,69 @@ fn paint_post(
     }
 
     (esc, ids)
+}
+
+/// Paint the social chip row ("4 people near you saved this · from @alice's
+/// session"). Returns whether a row was consumed.
+///
+/// Chips are pre-fitted to `w` by [`FeedItem::social_chips`] — the peer chip
+/// shrinks through shorter wordings and the origin chip drops out entirely
+/// before anything would reach the dock edge. The final `truncate_to_width`
+/// is belt-and-braces so a wide glyph can never bleed into the agent pane.
+fn paint_social_row(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    w: usize,
+    item: &FeedItem,
+    c: &CardColors,
+    theme: &Theme,
+) -> bool {
+    use unicode_width::UnicodeWidthStr;
+
+    let chips = item.social_chips(w);
+    if chips.is_empty() || w == 0 {
+        return false;
+    }
+    let mut cx = x;
+    let mut left = w;
+
+    if let Some(peer) = chips.peer.as_deref() {
+        let text = truncate_to_width(peer, left);
+        let used = UnicodeWidthStr::width(text.as_str());
+        buf.set_string(
+            cx,
+            y,
+            &text,
+            Style::default()
+                .fg(theme.accent_success)
+                .bg(c.bg)
+                .add_modifier(Modifier::BOLD),
+        );
+        cx = cx.saturating_add(used as u16);
+        left = left.saturating_sub(used);
+    }
+
+    if let Some(origin) = chips.origin.as_deref().filter(|_| left > 0) {
+        let text = if chips.peer.is_some() {
+            format!(" · {origin}")
+        } else {
+            origin.to_string()
+        };
+        // Own-session synths stay visible but recede.
+        let fg = if chips.origin_is_self {
+            theme.gray_dim
+        } else {
+            c.dim
+        };
+        buf.set_string(
+            cx,
+            y,
+            truncate_to_width(&text, left),
+            Style::default().fg(fg).bg(c.bg),
+        );
+    }
+    true
 }
 
 /// Intersection of two rects; `None` if empty.
@@ -660,4 +737,84 @@ fn render_footer(buf: &mut Buffer, area: Rect, state: &FeederState, theme: &Them
             .fg(theme.text_secondary)
             .bg(theme.bg_base),
     );
+}
+
+#[cfg(test)]
+mod social_render_tests {
+    use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    const SOCIAL: &str = r#"{ "source": "cohort", "peer_count": 4,
+        "synth_origin": "cohort", "origin_handle": "alice" }"#;
+
+    fn item(social: Option<&str>) -> FeedItem {
+        let social = social
+            .map(|s| format!(r#", "social": {s}"#))
+            .unwrap_or_default();
+        serde_json::from_str(&format!(
+            r#"{{ "id": "1", "kind": "x_post", "author": {{ "handle": "dbtips" }},
+                  "text": "pgvector HNSW gotcha", "reason_chips": ["From X"]{social} }}"#
+        ))
+        .expect("fixture parses")
+    }
+
+    /// Paint one card at `width` and return its rows as trimmed strings.
+    fn paint(it: &FeedItem, width: u16) -> Vec<String> {
+        let h = it.height_rows(width, false).saturating_sub(POST_GAP);
+        let area = Rect::new(0, 0, width, h);
+        let mut buf = Buffer::empty(area);
+        let _ = paint_post(&mut buf, area, it, false, false, &Theme::current(), area);
+        (0..h)
+            .map(|y| {
+                (0..width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_social_card_has_no_extra_row() {
+        let rows = paint(&item(None), 48);
+        assert!(rows[0].contains("@dbtips"), "{rows:?}");
+        assert!(rows[1].contains("From X"), "{rows:?}");
+        // Body starts immediately after the badge — no chip row, no blank row.
+        assert!(rows[2].contains("pgvector HNSW gotcha"), "{rows:?}");
+    }
+
+    #[test]
+    fn chip_row_sits_under_the_badge_and_body_follows() {
+        let rows = paint(&item(Some(SOCIAL)), 64);
+        assert!(rows[1].contains("From X"), "{rows:?}");
+        assert_eq!(
+            rows[2].trim_start_matches('▌').trim(),
+            "★ 4 people near you saved this · from @alice's session"
+        );
+        assert!(rows[3].contains("pgvector HNSW gotcha"), "{rows:?}");
+    }
+
+    #[test]
+    fn narrow_dock_keeps_the_headline_chip_inside_the_panel() {
+        for width in [40u16, 44, 48, 64] {
+            let rows = paint(&item(Some(SOCIAL)), width);
+            let chip = rows[2].trim_start_matches('▌').trim().to_string();
+            assert!(
+                chip.starts_with("★ 4 people near you saved this"),
+                "peer chip lost at {width}: {chip:?}"
+            );
+            // Never wider than the card's text column, never hard-truncated.
+            assert!(
+                UnicodeWidthStr::width(chip.as_str()) <= (width - 2) as usize,
+                "chip overflows dock at {width}: {chip:?}"
+            );
+            assert!(!chip.ends_with('…'), "chip clipped at {width}: {chip:?}");
+            // The card still ends with its metrics row.
+            assert!(
+                rows.last().is_some_and(|l| l.contains('♥')),
+                "metrics row lost at {width}: {rows:?}"
+            );
+        }
+    }
 }
